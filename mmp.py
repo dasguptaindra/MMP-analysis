@@ -269,9 +269,12 @@ def run_mmp_analysis(df, min_occurrences=5):
     # Collect frequently occurring pairs
     st.info("📊 Analyzing transformations...")
     mmp_list = []
-    for k, v in delta_df.groupby("Transform"):
+    transform_to_idx = {}  # Dictionary to map transform to index
+    
+    for idx, (k, v) in enumerate(delta_df.groupby("Transform")):
         if len(v) > min_occurrences:
             mmp_list.append([k, len(v), v.Delta.values])
+            transform_to_idx[k] = idx
     
     if not mmp_list:
         st.warning(f"No transformations found with at least {min_occurrences} occurrences. Try lowering the threshold.")
@@ -285,6 +288,9 @@ def run_mmp_analysis(df, min_occurrences=5):
     mmp_df['rxn_mol'] = mmp_df.Transform.apply(
         lambda x: AllChem.ReactionFromSmarts(x.replace('*-', '*'), useSmiles=True) if x else None
     )
+    
+    # Add transform idx to delta_df for easy lookup
+    delta_df['transform_idx'] = delta_df['Transform'].map(transform_to_idx)
     
     return df, row_df, delta_df, mmp_df
 
@@ -372,7 +378,7 @@ if uploaded_file is not None:
                     
                     # Show example compounds for this transform
                     transform_idx = row['idx']
-                    compound_pairs = delta_df[delta_df['idx'] == transform_idx].head(3)
+                    compound_pairs = delta_df[delta_df['transform_idx'] == transform_idx].head(3)
                     
                     if not compound_pairs.empty:
                         st.markdown("**Example Compound Pairs:**")
@@ -420,7 +426,7 @@ if uploaded_file is not None:
                     
                     # Show example compounds for this transform
                     transform_idx = row['idx']
-                    compound_pairs = delta_df[delta_df['idx'] == transform_idx].head(3)
+                    compound_pairs = delta_df[delta_df['transform_idx'] == transform_idx].head(3)
                     
                     if not compound_pairs.empty:
                         st.markdown("**Example Compound Pairs:**")
