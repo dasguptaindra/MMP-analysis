@@ -4,3 +4,5 @@ rdkit
 matplotlib
 seaborn
 tqdm
+numpy 
+rdkit-pypi
