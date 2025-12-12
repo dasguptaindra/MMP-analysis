@@ -273,7 +273,7 @@ if RDKIT_AVAILABLE:
         return results
 
     def perform_mmp_analysis(df, min_transform_occurrence):
-        """Perform MMP analysis matching the original logic"""
+        """Perform MMP analysis matching the original logic EXACTLY"""
         if df is None or len(df) == 0:
             return None, None
         
@@ -326,7 +326,7 @@ if RDKIT_AVAILABLE:
         if failed > 0:
             st.info(f"Successfully processed {successful} molecules, failed on {failed}")
         
-        # Step 2: Collect pairs - KEY CHANGE: Using len(v) > 2 (not > 1)
+        # Step 2: Collect pairs - EXACTLY matching original logic: len(v) > 2
         status_text.text("Step 2/4: Collecting molecular pairs...")
         progress_bar.progress(50)
         
@@ -334,7 +334,7 @@ if RDKIT_AVAILABLE:
         
         # Group by Core and iterate through each group
         for k, v in row_df.groupby("Core"):
-            # KEY CHANGE: Only process groups with more than 2 compounds (matching original logic)
+            # EXACT ORIGINAL LOGIC: Only process groups with more than 2 compounds
             if len(v) > 2:
                 # Generate all unique combinations of indices
                 for a, b in combinations(range(0, len(v)), 2):
@@ -352,26 +352,31 @@ if RDKIT_AVAILABLE:
                     delta = reagent_b.pIC50 - reagent_a.pIC50
                     
                     # Create transform string - ensure proper formatting with *-
+                    # EXACT ORIGINAL FORMAT: reagent_a.R_group.replace('*','*-')
                     transform_str = f"{reagent_a.R_group.replace('*', '*-')}>>{reagent_b.R_group.replace('*', '*-')}"
                     
-                    # Append to delta_list - matching original format exactly
-                    delta_list.append([
-                        reagent_a.SMILES, reagent_a.Core, reagent_a.R_group, reagent_a.Name, reagent_a.pIC50,
-                        reagent_b.SMILES, reagent_b.Core, reagent_b.R_group, reagent_b.Name, reagent_b.pIC50,
-                        transform_str, delta
-                    ])
+                    # EXACT ORIGINAL CODE STRUCTURE:
+                    # list(reagent_a.values) + list(reagent_b.values) + [transform_str, delta]
+                    delta_list.append(
+                        list(reagent_a.values) + list(reagent_b.values) + [transform_str, delta]
+                    )
         
         if not delta_list:
             st.error("No molecular pairs found")
             return None, None
         
         # Create DataFrame with matching column names
+        # Based on row_df columns: ["SMILES", "Core", "R_group", "Name", "pIC50"]
+        # We have reagent_a (5 cols) + reagent_b (5 cols) + transform + delta = 12 columns total
         cols = [
             "SMILES_1", "Core_1", "R_group_1", "Name_1", "pIC50_1",
-            "SMILES_2", "Core_2", "Rgroup_2", "Name_2", "pIC50_2",
+            "SMILES_2", "Core_2", "R_group_2", "Name_2", "pIC50_2",
             "Transform", "Delta"
         ]
         delta_df = pd.DataFrame(delta_list, columns=cols)
+        
+        # Debug info - show pair count
+        st.info(f"Generated {len(delta_df)} molecular pairs from {len(df)} compounds")
         
         # Step 3: Collect frequent transforms
         status_text.text("Step 3/4: Analyzing transformations...")
@@ -397,6 +402,7 @@ if RDKIT_AVAILABLE:
         for transform in mmp_df['Transform']:
             try:
                 # Try to create reaction from SMARTS
+                # Need to convert *- back to * for RDKit
                 rxn = AllChem.ReactionFromSmarts(transform.replace('*-', '*'), useSmiles=True)
                 rxn_mols.append(rxn)
             except Exception as e:
