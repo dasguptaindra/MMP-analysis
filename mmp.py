@@ -17,7 +17,7 @@ import subprocess
 # Try to import RDKit with error handling
 try:
     from rdkit import Chem
-    from rdkit.Chem import AllChem, Draw
+    from rdkit.Chem import AllChem, Draw, BRICS
     from rdkit.Chem.Draw import rdMolDraw2D
     RDKIT_AVAILABLE = True
 except ImportError as e:
@@ -79,7 +79,7 @@ min_transform_occurrence = st.sidebar.slider(
     "Minimum transform occurrences",
     min_value=1,
     max_value=20,
-    value=5,
+    value=2,
     help="Only consider transformations that occur at least this many times"
 )
 
@@ -108,18 +108,26 @@ def sort_fragments(mol):
     frag_num_atoms_list.sort(key=itemgetter(0), reverse=True)
     return [x[1] for x in frag_num_atoms_list]
 
-# Scaffold finder function
+# Fixed scaffold finder function using BRICS
 def FragmentMol(mol, maxCuts=1):
-    """Fragment molecule using RDKit's MMPA module"""
+    """Fragment molecule using BRICS decomposition"""
     try:
-        # Try different import methods
-        try:
-            from rdkit.Chem.rdMMPA import FragmentMol as RDKitFragmentMol
-            return RDKitFragmentMol(mol, maxCuts=maxCuts)
-        except ImportError:
-            # Alternative: Use BRICS fragmentation
-            from rdkit.Chem import BRICS
-            return BRICS.BRICSDecompose(mol, returnMols=True, singlePass=True)
+        # Use BRICS fragmentation
+        frags = BRICS.BRICSDecompose(mol)
+        results = []
+        
+        # Convert SMILES fragments back to molecules with labels
+        for frag_smiles in frags:
+            # Add wildcard atoms for connection points
+            frag_mol = Chem.MolFromSmiles(frag_smiles)
+            if frag_mol:
+                # Label the attachment points
+                for atom in frag_mol.GetAtoms():
+                    if atom.GetAtomicNum() == 0:  # Wildcard atom
+                        atom.SetAtomMapNum(1)
+                results.append((None, frag_mol))
+        
+        return results
     except Exception as e:
         st.warning(f"Fragmentation warning: {e}")
         return []
@@ -133,6 +141,48 @@ def get_largest_fragment(mol):
         return mol
     except:
         return mol
+
+# Alternative fragmentation method using cuttable bonds
+def fragment_with_cuttable_bonds(mol, max_cuts=1):
+    """Alternative fragmentation method that finds cuttable bonds"""
+    try:
+        # Find bonds that can be cut (single bonds not in rings)
+        cuttable_bonds = []
+        for bond in mol.GetBonds():
+            if bond.GetBondType() == Chem.rdchem.BondType.SINGLE:
+                if not bond.IsInRing():
+                    a1 = bond.GetBeginAtom()
+                    a2 = bond.GetEndAtom()
+                    # Don't cut bonds to hydrogen
+                    if a1.GetAtomicNum() != 1 and a2.GetAtomicNum() != 1:
+                        cuttable_bonds.append(bond.GetIdx())
+        
+        results = []
+        # Try cutting each bond
+        for bond_idx in cuttable_bonds[:min(max_cuts, len(cuttable_bonds))]:
+            # Create a copy and cut the bond
+            mol_copy = Chem.Mol(mol)
+            bond = mol_copy.GetBondWithIdx(bond_idx)
+            
+            # Convert to query atoms for wildcards
+            a1 = bond.GetBeginAtom()
+            a2 = bond.GetEndAtom()
+            
+            # Replace with wildcard atoms
+            a1.SetAtomicNum(0)
+            a1.SetAtomMapNum(1)
+            a2.SetAtomicNum(0)
+            a2.SetAtomMapNum(2)
+            
+            # Remove the bond
+            mol_copy.RemoveBond(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())
+            
+            results.append((bond_idx, mol_copy))
+        
+        return results
+    except Exception as e:
+        st.warning(f"Alternative fragmentation error: {e}")
+        return []
 
 # Plotting functions
 def rxn_to_image(rxn_mol, width=300, height=150):
@@ -211,7 +261,7 @@ def display_compound_grid(compounds_df, smiles_col="SMILES", id_col="Name", valu
     return fig
 
 # Main analysis function
-def run_mmp_analysis(df, min_occurrences=5):
+def run_mmp_analysis(df, min_occurrences=2):
     """Main MMP analysis pipeline"""
     
     # Process molecules
@@ -224,12 +274,28 @@ def run_mmp_analysis(df, min_occurrences=5):
     
     row_list = []
     for idx, (smiles, name, pIC50, mol) in enumerate(df[['SMILES', 'Name', 'pIC50', 'mol']].values):
+        if mol is None:
+            continue
+            
         try:
-            frag_list = FragmentMol(mol, maxCuts=1)
+            # Try multiple fragmentation methods
+            frag_list = []
+            
+            # Method 1: BRICS
+            try:
+                frag_list = FragmentMol(mol, maxCuts=1)
+            except:
+                pass
+                
+            # Method 2: Cuttable bonds (fallback)
+            if not frag_list:
+                frag_list = fragment_with_cuttable_bonds(mol, max_cuts=1)
+            
             for _, frag_mol in frag_list:
                 pair_list = sort_fragments(frag_mol)
-                tmp_list = [smiles] + [Chem.MolToSmiles(x) for x in pair_list] + [name, pIC50]
-                row_list.append(tmp_list)
+                if len(pair_list) >= 2:
+                    tmp_list = [smiles] + [Chem.MolToSmiles(x) for x in pair_list] + [name, pIC50]
+                    row_list.append(tmp_list)
         except Exception as e:
             st.warning(f"Error processing molecule {name}: {e}")
         
@@ -246,7 +312,7 @@ def run_mmp_analysis(df, min_occurrences=5):
     delta_list = []
     
     for k, v in row_df.groupby("Core"):
-        if len(v) > 2:
+        if len(v) > 1:  # Changed from 2 to 1 to find more pairs
             for a, b in combinations(range(len(v)), 2):
                 reagent_a = v.iloc[a]
                 reagent_b = v.iloc[b]
@@ -254,8 +320,8 @@ def run_mmp_analysis(df, min_occurrences=5):
                     continue
                 reagent_a, reagent_b = sorted([reagent_a, reagent_b], key=lambda x: x.SMILES)
                 delta = reagent_b.pIC50 - reagent_a.pIC50
-                delta_list.append(list(reagent_a.values) + list(reagent_b.values) +
-                                 [f"{reagent_a.R_group.replace('*', '*-')}>>{reagent_b.R_group.replace('*', '*-')}", delta])
+                transform_str = f"{reagent_a.R_group.replace('*', '*-')}>>{reagent_b.R_group.replace('*', '*-')}"
+                delta_list.append(list(reagent_a.values) + list(reagent_b.values) + [transform_str, delta])
     
     if not delta_list:
         st.error("No molecular pairs found. Try lowering the minimum occurrence threshold.")
@@ -272,7 +338,7 @@ def run_mmp_analysis(df, min_occurrences=5):
     transform_to_idx = {}  # Dictionary to map transform to index
     
     for idx, (k, v) in enumerate(delta_df.groupby("Transform")):
-        if len(v) > min_occurrences:
+        if len(v) >= min_occurrences:
             mmp_list.append([k, len(v), v.Delta.values])
             transform_to_idx[k] = idx
     
@@ -286,7 +352,7 @@ def run_mmp_analysis(df, min_occurrences=5):
     
     # Create reaction molecules
     mmp_df['rxn_mol'] = mmp_df.Transform.apply(
-        lambda x: AllChem.ReactionFromSmarts(x.replace('*-', '*'), useSmiles=True) if x else None
+        lambda x: AllChem.ReactionFromSmarts(x.replace('*-', '*'), useSmiles=True) if x and '*' in x else None
     )
     
     # Add transform idx to delta_df for easy lookup
@@ -470,7 +536,8 @@ if uploaded_file is not None:
                 # Distribution plot of all mean deltas
                 st.subheader("Distribution of Transformation Effects")
                 fig, ax = plt.subplots(figsize=(10, 4))
-                ax.hist(mmp_df_sorted['mean_delta'], bins=20, alpha=0.7, color='steelblue', edgecolor='black')
+                if len(mmp_df_sorted) > 1:
+                    ax.hist(mmp_df_sorted['mean_delta'], bins=min(20, len(mmp_df_sorted)), alpha=0.7, color='steelblue', edgecolor='black')
                 ax.axvline(x=0, color='red', linestyle='--', alpha=0.7)
                 ax.set_xlabel('Mean ΔpIC50')
                 ax.set_ylabel('Frequency')
@@ -590,9 +657,12 @@ else:
                 'CCc1ccc(cc1)S(=O)(=O)N',
                 'CCOc1ccc(cc1)S(=O)(=O)N',
                 'CNc1ccc(cc1)S(=O)(=O)N',
+                'C(=O)Nc1ccc(cc1)S(=O)(=O)N',
+                'C(F)(F)Fc1ccc(cc1)S(=O)(=O)N',
             ],
-            'Name': ['Compound1', 'Compound2', 'Compound3', 'Compound4', 'Compound5', 'Compound6'],
-            'pIC50': [7.2, 7.8, 6.9, 7.5, 8.1, 6.5]
+            'Name': ['Compound1', 'Compound2', 'Compound3', 'Compound4', 
+                    'Compound5', 'Compound6', 'Compound7', 'Compound8'],
+            'pIC50': [7.2, 7.8, 6.9, 7.5, 8.1, 6.5, 8.3, 5.8]
         }
         
         df_example = pd.DataFrame(example_data)
@@ -643,4 +713,3 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-
