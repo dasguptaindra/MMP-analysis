@@ -108,6 +108,250 @@ def sort_fragments(mol):
     frag_num_atoms_list.sort(key=itemgetter(0), reverse=True)
     return [x[1] for x in frag_num_atoms_list]
 
+# New function to handle atom list transformations
+def create_atom_list_smiles(atom_string):
+    """Convert atom string like 'C.C.C.C.C.C.C.F' to a valid SMILES"""
+    atoms = atom_string.split('.')
+    
+    # Count atoms
+    atom_counts = {}
+    for atom in atoms:
+        if atom in atom_counts:
+            atom_counts[atom] += 1
+        else:
+            atom_counts[atom] = 1
+    
+    # Create a simple linear molecule
+    # For disconnected atoms, we create a chain with branches
+    smiles_parts = []
+    
+    # Handle carbons separately to create a backbone
+    if 'C' in atom_counts:
+        c_count = atom_counts.pop('C')
+        # Create carbon chain
+        if c_count == 1:
+            smiles_parts.append('C')
+        elif c_count == 2:
+            smiles_parts.append('CC')
+        else:
+            smiles_parts.append('C' + 'C' * (c_count - 1))
+    
+    # Add other atoms as substituents or separate fragments
+    other_atoms = []
+    for atom, count in atom_counts.items():
+        for _ in range(count):
+            other_atoms.append(atom)
+    
+    # Create a simple structure: carbon chain with other atoms attached
+    if smiles_parts and other_atoms:
+        # Attach first other atom to the chain
+        base = f"{smiles_parts[0]}({other_atoms[0]})"
+        # Add remaining atoms as separate fragments
+        for atom in other_atoms[1:]:
+            base = f"{base}.{atom}"
+        smiles = base
+    elif smiles_parts:
+        smiles = smiles_parts[0]
+    elif other_atoms:
+        # If no carbons, just list the atoms
+        smiles = '.'.join(other_atoms)
+    else:
+        smiles = ''
+    
+    return smiles
+
+def parse_transform_to_reaction(transform_str):
+    """Parse a transform string like 'A.B.C>>D.E.F' to RDKit reaction"""
+    try:
+        # Split into reactants and products
+        if '>>' in transform_str:
+            reactant_str, product_str = transform_str.split('>>')
+        else:
+            raise ValueError("Transform string must contain '>>'")
+        
+        # Convert atom strings to SMILES
+        reactant_smiles = create_atom_list_smiles(reactant_str)
+        product_smiles = create_atom_list_smiles(product_str)
+        
+        # Create reaction SMARTS
+        reaction_smarts = f"{reactant_smiles}>>{product_smiles}"
+        
+        # Try to create the reaction
+        try:
+            rxn = AllChem.ReactionFromSmarts(reaction_smarts)
+            return rxn, reactant_smiles, product_smiles, reaction_smarts
+        except:
+            # Try alternative approach
+            try:
+                rxn = AllChem.ReactionFromSmarts(reaction_smarts, useSmiles=True)
+                return rxn, reactant_smiles, product_smiles, reaction_smarts
+            except:
+                # Create a simple reaction with wildcards
+                # Replace with wildcards for the changing parts
+                reactant_mol = Chem.MolFromSmiles(reactant_smiles)
+                product_mol = Chem.MolFromSmiles(product_smiles)
+                
+                if reactant_mol and product_mol:
+                    # Simple approach: just show both molecules
+                    return None, reactant_smiles, product_smiles, reaction_smarts
+                else:
+                    return None, reactant_smiles, product_smiles, reaction_smarts
+    except Exception as e:
+        return None, None, None, None
+
+def analyze_atom_transform(transform_str):
+    """Analyze atom list transformation and return human-readable description"""
+    if '>>' not in transform_str:
+        return None
+    
+    reactant_str, product_str = transform_str.split('>>')
+    
+    def count_atoms(atom_str):
+        atoms = atom_str.split('.')
+        counts = {}
+        for atom in atoms:
+            counts[atom] = counts.get(atom, 0) + 1
+        return counts
+    
+    reactant_counts = count_atoms(reactant_str)
+    product_counts = count_atoms(product_str)
+    
+    # Find differences
+    changes = []
+    all_atoms = set(list(reactant_counts.keys()) + list(product_counts.keys()))
+    
+    for atom in all_atoms:
+        reactant_count = reactant_counts.get(atom, 0)
+        product_count = product_counts.get(atom, 0)
+        
+        if reactant_count != product_count:
+            diff = product_count - reactant_count
+            if diff > 0:
+                changes.append(f"+{diff} {atom} atom{'s' if diff > 1 else ''}")
+            elif diff < 0:
+                changes.append(f"{diff} {atom} atom{'s' if diff < -1 else ''}")
+    
+    # Create summary
+    summary = f"**Atom Count Changes:**\n\n"
+    summary += f"**Reactant:** {reactant_str[:50]}...\n\n" if len(reactant_str) > 50 else f"**Reactant:** {reactant_str}\n\n"
+    summary += f"**Product:** {product_str[:50]}...\n\n" if len(product_str) > 50 else f"**Product:** {product_str}\n\n"
+    
+    if changes:
+        summary += f"**Changes:** {'; '.join(changes)}"
+    else:
+        summary += "**Changes:** No atom count changes"
+    
+    return summary, reactant_counts, product_counts, changes
+
+# Modified rxn_to_image function
+def rxn_to_image(rxn_smarts, width=300, height=150):
+    """Convert reaction SMARTS to PIL Image"""
+    try:
+        # Check if it looks like an atom list transformation
+        if '.' in rxn_smarts and '>>' in rxn_smarts and all(len(part) <= 2 for part in rxn_smarts.replace('>>', '.').split('.')):
+            # This looks like an atom list (C.C.C>>C.C.C.C format)
+            summary, reactant_counts, product_counts, changes = analyze_atom_transform(rxn_smarts)
+            
+            # Create a text-based visualization
+            from PIL import Image, ImageDraw, ImageFont
+            img = Image.new('RGB', (width, height), color='white')
+            draw = ImageDraw.Draw(img)
+            
+            try:
+                # Try to load a font
+                font = ImageFont.truetype("arial.ttf", 12)
+            except:
+                try:
+                    font = ImageFont.load_default()
+                except:
+                    font = None
+            
+            # Draw the transformation
+            y_offset = 10
+            # Draw reactants
+            if font:
+                draw.text((10, y_offset), "Reactants:", fill='black', font=font)
+            else:
+                draw.text((10, y_offset), "Reactants:", fill='black')
+            
+            y_offset += 20
+            
+            # Show atom counts for reactants
+            reactant_text = ""
+            for atom, count in sorted(reactant_counts.items()):
+                reactant_text += f"{atom}×{count} "
+            
+            if font:
+                draw.text((20, y_offset), reactant_text.strip(), fill='blue', font=font)
+            else:
+                draw.text((20, y_offset), reactant_text.strip(), fill='blue')
+            
+            y_offset += 30
+            
+            # Draw arrow
+            if font:
+                draw.text((width//2 - 5, y_offset), "→", fill='red', font=font)
+            else:
+                draw.text((width//2 - 5, y_offset), "→", fill='red')
+            
+            y_offset += 30
+            
+            # Draw products
+            if font:
+                draw.text((10, y_offset), "Products:", fill='black', font=font)
+            else:
+                draw.text((10, y_offset), "Products:", fill='black')
+            
+            y_offset += 20
+            
+            # Show atom counts for products
+            product_text = ""
+            for atom, count in sorted(product_counts.items()):
+                product_text += f"{atom}×{count} "
+            
+            if font:
+                draw.text((20, y_offset), product_text.strip(), fill='green', font=font)
+            else:
+                draw.text((20, y_offset), product_text.strip(), fill='green')
+            
+            y_offset += 30
+            
+            # Draw changes
+            if changes:
+                changes_text = "Change: " + ", ".join(changes)
+                if font:
+                    draw.text((10, y_offset), changes_text[:40], fill='purple', font=font)
+                else:
+                    draw.text((10, y_offset), changes_text[:40], fill='purple')
+            
+            return img
+        
+        # Original code for regular reactions
+        rxn = AllChem.ReactionFromSmarts(rxn_smarts, useSmiles=True)
+        img = Draw.ReactionToImage(rxn, subImgSize=(width, height))
+        return img
+    except Exception as e:
+        # Create a simple text image as fallback
+        try:
+            from PIL import Image, ImageDraw
+            img = Image.new('RGB', (width, height), color='white')
+            draw = ImageDraw.Draw(img)
+            
+            # Show the transform string
+            text = str(rxn_smarts)
+            if len(text) > 40:
+                text = text[:37] + "..."
+            
+            # Center the text
+            text_width = len(text) * 6  # Approximate width
+            text_x = max(10, (width - text_width) // 2)
+            
+            draw.text((text_x, height//2 - 10), text, fill='black')
+            return img
+        except:
+            # Ultimate fallback
+            return Image.new('RGB', (width, height), color='white')
+
 # Simplified fragmentation method using SMARTS patterns
 def get_mmp_fragments_simple(mol):
     """Simple fragmentation method using common attachment points"""
@@ -379,18 +623,6 @@ def get_largest_fragment(mol):
         return mol
 
 # Plotting functions
-def rxn_to_image(rxn_smarts, width=300, height=150):
-    """Convert reaction SMARTS to PIL Image"""
-    try:
-        # Create reaction from SMARTS
-        rxn = AllChem.ReactionFromSmarts(rxn_smarts, useSmiles=True)
-        img = Draw.ReactionToImage(rxn, subImgSize=(width, height))
-        return img
-    except:
-        # Create a placeholder image
-        img = Image.new('RGB', (width, height), color='white')
-        return img
-
 def mol_to_image(mol, width=200, height=200):
     """Convert RDKit molecule to PIL Image"""
     try:
@@ -462,6 +694,50 @@ def display_compound_grid(compounds_df, smiles_col="SMILES", id_col="Name", valu
     
     plt.tight_layout()
     return fig
+
+# Test transformation in sidebar
+st.sidebar.header("🔬 Test Specific Transformation")
+test_transform = st.sidebar.text_input(
+    "Enter a transformation to test:",
+    value="C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.F.N.N.O.O.O.O.O.S>>C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.F.N.N.N.O.O.O.O.O.S"
+)
+
+if st.sidebar.button("Test This Transformation"):
+    st.sidebar.subheader("Transformation Analysis")
+    
+    if '>>' in test_transform:
+        # Analyze the transformation
+        result = analyze_atom_transform(test_transform)
+        if result:
+            summary, reactant_counts, product_counts, changes = result
+            
+            st.sidebar.markdown(summary)
+            
+            # Display as image
+            img = rxn_to_image(test_transform, width=400, height=200)
+            st.sidebar.image(img, caption="Transformation Visualization")
+            
+            # Show in a more detailed way
+            with st.sidebar.expander("Detailed Analysis"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write("**Reactant Atoms:**")
+                    for atom, count in sorted(reactant_counts.items()):
+                        st.write(f"{atom}: {count}")
+                
+                with col2:
+                    st.write("**Product Atoms:**")
+                    for atom, count in sorted(product_counts.items()):
+                        st.write(f"{atom}: {count}")
+                
+                if changes:
+                    st.write("**Net Change:**")
+                    for change in changes:
+                        st.write(f"• {change}")
+        else:
+            st.sidebar.error("Could not parse the transformation")
+    else:
+        st.sidebar.error("Invalid transformation format. Use 'A.B.C>>D.E.F' format")
 
 # Main analysis function
 def run_mmp_analysis(df, min_occurrences=2):
@@ -870,6 +1146,10 @@ else:
                         st.write(f"**Transform:** `{top_transform['Transform']}`")
                         st.write(f"**Mean ΔpIC50:** {top_transform['mean_delta']:.3f}")
                         st.write(f"**Occurrences:** {top_transform['Count']}")
+                        
+                        # Display the transformation
+                        img = rxn_to_image(top_transform['Transform'], width=400, height=200)
+                        st.image(img, caption="Example Transformation")
                     else:
                         st.warning("No transformations found with example data.")
                         if row_df is not None:
