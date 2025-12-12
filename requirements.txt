@@ -1,8 +1,7 @@
-streamlit
-pandas
-rdkit
-matplotlib
-seaborn
-mols2grid
-tqdm
-openpyxl
+streamlit>=1.28.0
+pandas>=2.0.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+numpy>=1.24.0
+pillow>=10.0.0
+rdkit-pypi>=2023.9.5
