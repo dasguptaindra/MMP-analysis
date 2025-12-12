@@ -1,9 +1,8 @@
 streamlit
 pandas
 rdkit
-requests
-mols2grid
-seaborn
 matplotlib
+seaborn
+mols2grid
 tqdm
 openpyxl
