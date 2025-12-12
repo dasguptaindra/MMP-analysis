@@ -314,4 +314,46 @@ if uploaded_file and run_btn:
 
                 with tab2:
                     st.subheader("Full Transformation Table")
-                    st.dataframe(mmp_df.drop(columns=['Deltas'], errors='ignore').
+                    st.dataframe(mmp_df.drop(columns=['Deltas'], errors='ignore').sort_values("mean_delta", ascending=False))
+                    
+                    st.write("### Interactive Detail Viewer")
+                    selected_transform = st.selectbox("Select a Transform to view details:", mmp_df['Transform'].unique())
+                    
+                    if selected_transform:
+                        sel_row = mmp_df[mmp_df['Transform'] == selected_transform].iloc[0]
+                        st.write(f"**Mean Delta:** {sel_row['mean_delta']:.2f}, **Count:** {sel_row['Count']}")
+                        
+                        try:
+                            rxn = AllChem.ReactionFromSmarts(selected_transform.replace('*-','*'), useSmiles=True)
+                            st.image(rxn_to_image(rxn), width=400)
+                        except:
+                            st.write("Image N/A")
+                        
+                        fig, ax = plt.subplots(figsize=(6, 2))
+                        sns.stripplot(x=sel_row['Deltas'], ax=ax, color='purple', alpha=0.6)
+                        ax.axvline(0, ls="--", c="black")
+                        ax.set_title("ΔpIC50 Distribution")
+                        st.pyplot(fig)
+                        plt.close(fig)
+
+                with tab3:
+                    st.subheader("Export Results")
+                    
+                    mmp_sorted = mmp_df.sort_values("mean_delta")
+                    mmp_export = mmp_sorted.copy()
+                    mmp_export['Deltas'] = mmp_export['Deltas'].apply(lambda x: str(list(x)))
+                    
+                    output = io.BytesIO()
+                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                        mmp_export.to_excel(writer, index=False, sheet_name='All Transforms')
+                        delta_df.to_excel(writer, index=False, sheet_name='Pairs Data')
+                    
+                    st.download_button(
+                        label="Download Full Analysis (Excel)",
+                        data=output.getvalue(),
+                        file_name="MMP_Analysis_Full.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+
+else:
+    st.info("Please upload a CSV file to begin.")
