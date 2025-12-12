@@ -184,4 +184,70 @@ if uploaded_file and 'run_btn' in locals() and run_btn:
                 
                 delta_list.append([
                     reagent_a['SMILES'], reagent_a['Core'], reagent_a['R_group'], reagent_a['Name'], reagent_a['Property'],
-                    reagent_b['SMILES'], reagent_b['Core'], reagent_
+                    reagent_b['SMILES'], reagent_b['Core'], reagent_b['R_group'], reagent_b['Name'], reagent_b['Property'],
+                    trans_str, delta
+                ])
+                
+    delta_df = pd.DataFrame(delta_list, columns=[
+        "SMILES_1","Core_1","R_group_1","Name_1","Property_1",
+        "SMILES_2","Core_2","R_group_2","Name_2","Property_2",
+        "Transform","Delta"])
+    
+    progress_bar.progress(80)
+    
+    # 4. Results
+    mmp_list = []
+    if not delta_df.empty:
+        for trans, group in delta_df.groupby("Transform"):
+            if len(group) >= min_occurence:
+                mmp_list.append([trans, len(group), group['Delta'].values, group['Delta'].mean()])
+    
+    mmp_df = pd.DataFrame(mmp_list, columns=["Transform", "Count", "Deltas", "Mean_Delta"])
+    if not mmp_df.empty:
+        mmp_df = mmp_df.sort_values("Mean_Delta", ascending=False).reset_index(drop=True)
+    
+    progress_bar.progress(100)
+    
+    if mmp_df.empty:
+        st.warning(f"Fragments generated ({len(row_df)}), but no matched pairs met the threshold ({min_occurence}).")
+        st.write(f"Total potential pairs found: {len(delta_df)}")
+        st.write("Suggestion: Lower the 'Min Transform Occurrence' to 2.")
+    else:
+        st.success(f"Found {len(mmp_df)} distinct transforms.")
+        
+        tab1, tab2, tab3 = st.tabs(["Overview", "Table", "Pairs"])
+        
+        with tab1:
+            st.subheader("Distribution")
+            top_n = st.slider("Show Top N", 5, 50, 15)
+            subset_df = mmp_df.head(top_n)
+            
+            plot_data = []
+            for idx, row in subset_df.iterrows():
+                for d in row['Deltas']:
+                    plot_data.append({'Transform': row['Transform'], 'Delta': d})
+            
+            if plot_data:
+                fig, ax = plt.subplots(figsize=(10, 6))
+                sns.boxplot(data=pd.DataFrame(plot_data), x='Delta', y='Transform', ax=ax, orient='h')
+                plt.axvline(0, color='r', linestyle='--')
+                st.pyplot(fig)
+        
+        with tab2:
+            st.dataframe(mmp_df[['Transform', 'Count', 'Mean_Delta']].style.background_gradient(subset=['Mean_Delta'], cmap='coolwarm'))
+
+        with tab3:
+            selected_trans = st.selectbox("Select Transform", mmp_df['Transform'].tolist())
+            if selected_trans:
+                subset = delta_df[delta_df['Transform'] == selected_trans]
+                st.write(f"Showing {len(subset)} pairs")
+                
+                for i, row in subset.head(20).iterrows():
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.image(Draw.MolToImage(Chem.MolFromSmiles(row['SMILES_1']), size=(200,150)))
+                        st.caption(f"{row['Name_1']} ({row['Property_1']})")
+                    with c2:
+                        st.image(Draw.MolToImage(Chem.MolFromSmiles(row['SMILES_2']), size=(200,150)))
+                        st.caption(f"{row['Name_2']} ({row['Property_2']})")
+                    st.divider()
