@@ -1,8 +1,9 @@
 streamlit
 pandas
 rdkit
-matplotlib
+requests
+mols2grid
 seaborn
+matplotlib
 tqdm
-numpy 
-rdkit-pypi
+openpyxl
