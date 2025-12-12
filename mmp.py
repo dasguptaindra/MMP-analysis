@@ -5,12 +5,9 @@ from rdkit import Chem
 from rdkit.Chem import Draw, AllChem
 from rdkit.Chem.rdMMPA import FragmentMol
 from rdkit.Chem.rdRGroupDecomposition import RGroupDecompose
-from rdkit.Chem.MolStandardize import rdMolStandardize
 import itertools
 import matplotlib.pyplot as plt
 from itertools import combinations
-from tqdm import tqdm
-from io import BytesIO
 
 # ==========================================
 # Enhanced Helper Functions
@@ -73,7 +70,6 @@ def generate_fragments_enhanced(mol, min_fragment_size=0.5):
         try:
             frag_list = FragmentMol(mol, maxCuts=2, resultsAsMols=False, pattern="[#6+0;!$(*=,#[!#6])]!@!=!#[*]")
         except Exception as e:
-            st.warning(f"MMPA fragmentation failed for molecule: {Chem.MolToSmiles(mol)[:50]}... Error: {e}")
             # Fallback: return the molecule itself as a scaffold
             frag_smiles = Chem.MolToSmiles(mol)
             frag_df = pd.DataFrame([[frag_smiles, mol.GetNumAtoms(), 1]], 
@@ -132,7 +128,6 @@ def generate_fragments_enhanced(mol, min_fragment_size=0.5):
         return frag_df
         
     except Exception as e:
-        st.warning(f"Error generating fragments: {e}")
         # Return the molecule itself as a fallback
         try:
             frag_smiles = Chem.MolToSmiles(mol)
@@ -150,22 +145,33 @@ def find_scaffolds_enhanced(df_in, min_fragment_size=0.5):
     """
     df_list = []
     processed_molecules = 0
+    total_molecules = len(df_in)
     
-    # Use tqdm for progress tracking
-    for smiles, name, mol in tqdm(df_in[["SMILES", "Name", "mol"]].values, desc="Generating scaffolds"):
+    # Simple progress indicator
+    progress_text = st.empty()
+    progress_bar = st.progress(0)
+    
+    for idx, (smiles, name, mol) in enumerate(df_in[["SMILES", "Name", "mol"]].values):
+        progress_text.text(f"Processing molecule {idx+1}/{total_molecules}: {name}")
+        progress_bar.progress((idx + 1) / total_molecules)
+        
         if mol is not None:
             try:
                 tmp_df = generate_fragments_enhanced(mol, min_fragment_size).copy()
                 if not tmp_df.empty:
                     tmp_df['Name'] = name
                     tmp_df['SMILES'] = smiles
+                    # Add pIC50 if available in original df
+                    if 'pIC50' in df_in.columns:
+                        tmp_df['pIC50'] = df_in[df_in['SMILES'] == smiles]['pIC50'].iloc[0] if len(df_in[df_in['SMILES'] == smiles]) > 0 else 0
                     df_list.append(tmp_df)
                     processed_molecules += 1
             except Exception as e:
-                st.warning(f"Failed to process {name}: {e}")
                 continue
     
-    st.info(f"Successfully processed {processed_molecules}/{len(df_in)} molecules")
+    progress_text.empty()
+    progress_bar.empty()
+    st.info(f"Successfully processed {processed_molecules}/{total_molecules} molecules")
     
     if not df_list:
         return pd.DataFrame(), pd.DataFrame()
@@ -215,10 +221,10 @@ def simple_scaffold_analysis(mol):
 # Streamlit App
 # ==========================================
 
-st.set_page_config(page_title="Advanced MMP & Scaffold Analysis", layout="wide")
-st.title("🧬 Advanced MMP & Scaffold Analysis")
+st.set_page_config(page_title="Advanced Scaffold Analysis", layout="wide")
+st.title("🧬 Advanced Scaffold Analysis")
 st.markdown("""
-This app performs comprehensive scaffold-based MMP analysis to identify structural transformations 
+This app performs comprehensive scaffold analysis to identify common molecular frameworks 
 and their effect on biological activity. Upload a CSV file containing molecules and activity data.
 """)
 
@@ -292,7 +298,7 @@ with st.sidebar:
 # --- Main Analysis Logic ---
 if uploaded_file is not None and run_btn:
     # Initialize progress tracking
-    progress_bar = st.progress(0)
+    main_progress_bar = st.progress(0)
     status_text = st.empty()
     
     try:
@@ -326,6 +332,7 @@ if uploaded_file is not None and run_btn:
         
         # Convert SMILES to molecules
         status_text.text("Step 2/5: Converting SMILES to molecules...")
+        main_progress_bar.progress(20)
         
         # Add error handling for SMILES conversion
         input_df['mol'] = input_df['SMILES'].apply(lambda x: Chem.MolFromSmiles(str(x)) if pd.notna(x) else None)
@@ -334,10 +341,6 @@ if uploaded_file is not None and run_btn:
         invalid_count = input_df['mol'].isnull().sum()
         if invalid_count > 0:
             st.warning(f"Skipping {invalid_count} invalid SMILES strings")
-            # Show examples of invalid SMILES
-            invalid_examples = input_df[input_df['mol'].isnull()]['SMILES'].head(5).tolist()
-            if invalid_examples:
-                st.caption(f"Example invalid SMILES: {', '.join(invalid_examples)}")
         
         # Filter invalid mols
         input_df = input_df[input_df['mol'].notnull()]
@@ -347,7 +350,7 @@ if uploaded_file is not None and run_btn:
             st.stop()
         
         st.info(f"Processing {len(input_df)} valid molecules...")
-        progress_bar.progress(20)
+        main_progress_bar.progress(40)
         
         # 2. Generate Scaffolds
         status_text.text("Step 3/5: Generating molecular scaffolds...")
@@ -376,7 +379,7 @@ if uploaded_file is not None and run_btn:
             # Use enhanced MMPA method
             mol_df, scaffold_df = find_scaffolds_enhanced(input_df, fragment_threshold)
         
-        progress_bar.progress(40)
+        main_progress_bar.progress(60)
         
         if scaffold_df.empty:
             st.error("No scaffolds generated. Check input structures.")
@@ -411,7 +414,7 @@ if uploaded_file is not None and run_btn:
                 st.dataframe(all_scaffolds.reset_index().rename(columns={'count': 'Frequency'}))
             st.stop()
         
-        progress_bar.progress(60)
+        main_progress_bar.progress(80)
         
         # 3. Analyze Top Scaffolds
         status_text.text("Step 4/5: Analyzing top scaffolds...")
@@ -427,6 +430,19 @@ if uploaded_file is not None and run_btn:
         if not selected_scaffolds:
             st.warning("Please select at least one scaffold to analyze.")
             st.stop()
+        
+        # Ensure we have the 'Scaffold' column in input_df for visualization
+        if 'Scaffold' not in input_df.columns:
+            if analysis_method == "Simple Murcko Scaffolds":
+                # Already added above
+                pass
+            else:
+                # For MMPA method, need to merge scaffold info back to input_df
+                scaffold_map = mol_df[['SMILES', 'Scaffold']].drop_duplicates()
+                input_df = input_df.merge(scaffold_map, on='SMILES', how='left')
+        
+        main_progress_bar.progress(100)
+        status_text.text("Step 5/5: Preparing results...")
         
         # Create tabs for different views
         tab1, tab2, tab3, tab4 = st.tabs([
@@ -463,17 +479,23 @@ if uploaded_file is not None and run_btn:
                 ax1.set_title('Top 10 Most Frequent Scaffolds')
                 ax1.invert_yaxis()
                 
-                # Plot 2: Property distribution by scaffold
-                for scaffold in selected_scaffolds[:5]:  # Limit to 5 for clarity
-                    scaffold_data = input_df[input_df['Scaffold'] == scaffold]['pIC50']
-                    if len(scaffold_data) > 0:
-                        ax2.hist(scaffold_data, alpha=0.5, label=scaffold[:15] + '...', bins=10)
-                
-                ax2.set_xlabel('pIC50')
-                ax2.set_ylabel('Frequency')
-                ax2.set_title('Property Distribution by Scaffold')
-                ax2.legend()
-                ax2.grid(True, alpha=0.3)
+                # Plot 2: Property distribution by scaffold - only if 'Scaffold' exists in input_df
+                if 'Scaffold' in input_df.columns:
+                    for scaffold in selected_scaffolds[:5]:  # Limit to 5 for clarity
+                        scaffold_data = input_df[input_df['Scaffold'] == scaffold]['pIC50']
+                        if len(scaffold_data) > 0:
+                            ax2.hist(scaffold_data, alpha=0.5, label=scaffold[:15] + '...', bins=10)
+                    
+                    ax2.set_xlabel('pIC50')
+                    ax2.set_ylabel('Frequency')
+                    ax2.set_title('Property Distribution by Scaffold')
+                    if selected_scaffolds:  # Only add legend if we have scaffolds
+                        ax2.legend()
+                    ax2.grid(True, alpha=0.3)
+                else:
+                    ax2.text(0.5, 0.5, 'Scaffold data not available for visualization', 
+                            ha='center', va='center', transform=ax2.transAxes)
+                    ax2.set_title('Property Distribution by Scaffold')
                 
                 plt.tight_layout()
                 st.pyplot(fig)
@@ -488,55 +510,62 @@ if uploaded_file is not None and run_btn:
             )
             
             # Show scaffold structures
-            st.subheader("Selected Scaffold Structures")
-            cols = st.columns(min(3, len(selected_scaffolds)))
-            
-            for idx, scaffold_smiles in enumerate(selected_scaffolds):
-                with cols[idx % 3]:
-                    try:
-                        mol = Chem.MolFromSmiles(scaffold_smiles)
-                        if mol:
-                            img = Draw.MolToImage(mol, size=(300, 200))
-                            st.image(img, caption=f"Scaffold {idx+1}")
-                            st.caption(f"SMILES: `{scaffold_smiles}`")
-                            st.caption(f"Molecules: {scaffold_df[scaffold_df['Scaffold'] == scaffold_smiles]['Count'].iloc[0]}")
-                    except:
-                        st.warning(f"Could not render scaffold {idx+1}")
+            if selected_scaffolds:
+                st.subheader("Selected Scaffold Structures")
+                cols = st.columns(min(3, len(selected_scaffolds)))
+                
+                for idx, scaffold_smiles in enumerate(selected_scaffolds):
+                    with cols[idx % 3]:
+                        try:
+                            mol = Chem.MolFromSmiles(scaffold_smiles)
+                            if mol:
+                                img = Draw.MolToImage(mol, size=(300, 200))
+                                st.image(img, caption=f"Scaffold {idx+1}")
+                                st.caption(f"SMILES: `{scaffold_smiles}`")
+                                count = scaffold_df[scaffold_df['Scaffold'] == scaffold_smiles]['Count'].iloc[0] if not scaffold_df.empty else 0
+                                st.caption(f"Molecules: {count}")
+                        except:
+                            st.warning(f"Could not render scaffold {idx+1}")
+            else:
+                st.info("No scaffolds selected for display.")
         
         with tab3:
             st.subheader("Molecule Viewer")
             
-            # Select scaffold to view molecules
-            selected_scaffold = st.selectbox("Select a scaffold to view molecules", selected_scaffolds)
-            
-            if selected_scaffold:
-                # Get molecules with this scaffold
-                scaffold_molecules = input_df[input_df['Scaffold'] == selected_scaffold]
+            if 'Scaffold' in input_df.columns and selected_scaffolds:
+                # Select scaffold to view molecules
+                selected_scaffold = st.selectbox("Select a scaffold to view molecules", selected_scaffolds)
                 
-                st.write(f"Found {len(scaffold_molecules)} molecules with this scaffold")
-                
-                # Display molecules in a grid
-                st.dataframe(
-                    scaffold_molecules[['Name', 'SMILES', 'pIC50']].sort_values('pIC50', ascending=False),
-                    use_container_width=True,
-                    height=300
-                )
-                
-                # Show some example molecules
-                st.subheader("Example Molecules")
-                example_mols = scaffold_molecules.head(4)
-                
-                cols = st.columns(4)
-                for idx, (_, row) in enumerate(example_mols.iterrows()):
-                    with cols[idx % 4]:
-                        try:
-                            mol = Chem.MolFromSmiles(row['SMILES'])
-                            if mol:
-                                img = Draw.MolToImage(mol, size=(200, 150))
-                                st.image(img, caption=row['Name'])
-                                st.caption(f"pIC50: {row['pIC50']:.2f}")
-                        except:
-                            st.warning(f"Could not render {row['Name']}")
+                if selected_scaffold:
+                    # Get molecules with this scaffold
+                    scaffold_molecules = input_df[input_df['Scaffold'] == selected_scaffold]
+                    
+                    st.write(f"Found {len(scaffold_molecules)} molecules with this scaffold")
+                    
+                    # Display molecules in a grid
+                    st.dataframe(
+                        scaffold_molecules[['Name', 'SMILES', 'pIC50']].sort_values('pIC50', ascending=False),
+                        use_container_width=True,
+                        height=300
+                    )
+                    
+                    # Show some example molecules
+                    st.subheader("Example Molecules")
+                    example_mols = scaffold_molecules.head(4)
+                    
+                    cols = st.columns(4)
+                    for idx, (_, row) in enumerate(example_mols.iterrows()):
+                        with cols[idx % 4]:
+                            try:
+                                mol = Chem.MolFromSmiles(row['SMILES'])
+                                if mol:
+                                    img = Draw.MolToImage(mol, size=(200, 150))
+                                    st.image(img, caption=row['Name'])
+                                    st.caption(f"pIC50: {row['pIC50']:.2f}")
+                            except:
+                                st.warning(f"Could not render {row['Name']}")
+            else:
+                st.info("No scaffold data available for molecule viewing.")
         
         with tab4:
             st.subheader("Download Results")
@@ -588,8 +617,9 @@ if uploaded_file is not None and run_btn:
                     use_container_width=True
                 )
         
-        progress_bar.progress(100)
-        status_text.text("Analysis complete!")
+        status_text.empty()
+        main_progress_bar.empty()
+        st.success("✅ Analysis Complete!")
     
     except Exception as e:
         st.error(f"An error occurred during analysis: {str(e)}")
@@ -621,21 +651,22 @@ elif uploaded_file is None:
         st.dataframe(example_df, use_container_width=True)
         
         st.markdown("""
-        ### **Key Improvements in This Version:**
+        ### **Expected Data Format:**
+        - **SMILES**: Molecular structures in SMILES format
+        - **Name/ID**: Compound identifiers (unique names recommended)
+        - **pIC50/Property**: Numerical property values (higher = more active)
         
-        1. **Better Error Handling**: Multiple fallback strategies when MMPA fails
-        2. **Dual Analysis Methods**: Choose between sophisticated MMPA or robust Murcko scaffolds
-        3. **Lower Default Thresholds**: More inclusive fragment size (50% instead of 67%)
-        4. **Enhanced Debugging**: Shows which molecules fail and why
-        5. **Simplified Workflow**: Focus on scaffold analysis when MMP pairs aren't generated
+        ### **How It Works:**
+        1. **Scaffold Generation**: The app identifies common molecular frameworks
+        2. **Scaffold Analysis**: Groups molecules by their core scaffolds
+        3. **Property Analysis**: Analyzes activity distribution within scaffold families
+        4. **Visualization**: Displays scaffold structures and molecule examples
         
-        ### **If You Still Get "No Fragments":**
-        
-        1. **Try the "Simple Murcko Scaffolds" method** - more robust for small/diverse datasets
-        2. **Lower the fragment size threshold** to 0.3 or 0.4
-        3. **Lower the minimum scaffold occurrence** to 1 or 2
-        4. **Check your SMILES** - ensure they're valid chemical structures
-        5. **Try with the example data first** to verify the app works
+        ### **Tips for Success:**
+        1. **Start with Simple Murcko Scaffolds** for more robust results
+        2. **Lower thresholds** if you have a small dataset
+        3. **Check your SMILES** for validity
+        4. **Use the example data** to test the app first
         """)
 
 # Footer
