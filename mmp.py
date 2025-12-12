@@ -122,6 +122,14 @@ with st.sidebar:
         show_top_negative = st.checkbox("Show top negative transforms", value=True)
         show_compound_examples = st.checkbox("Show compound examples", value=True)
         
+        # Pair generation logic
+        st.markdown("### 🔗 Pair Generation Logic")
+        st.info("""
+        **Pairs are generated only when 3+ compounds share the same core.**
+        
+        This reduces noise and focuses on statistically significant transformations.
+        """)
+        
         # Save options
         st.markdown("### 💾 Export")
         save_results = st.checkbox("Save results to Excel")
@@ -265,7 +273,7 @@ if RDKIT_AVAILABLE:
         return results
 
     def perform_mmp_analysis(df, min_transform_occurrence):
-        """Perform MMP analysis"""
+        """Perform MMP analysis matching the original logic"""
         if df is None or len(df) == 0:
             return None, None
         
@@ -318,24 +326,35 @@ if RDKIT_AVAILABLE:
         if failed > 0:
             st.info(f"Successfully processed {successful} molecules, failed on {failed}")
         
-        # Step 2: Collect pairs
+        # Step 2: Collect pairs - KEY CHANGE: Using len(v) > 2 (not > 1)
         status_text.text("Step 2/4: Collecting molecular pairs...")
         progress_bar.progress(50)
         
         delta_list = []
+        
+        # Group by Core and iterate through each group
         for k, v in row_df.groupby("Core"):
-            if len(v) > 1:
+            # KEY CHANGE: Only process groups with more than 2 compounds (matching original logic)
+            if len(v) > 2:
+                # Generate all unique combinations of indices
                 for a, b in combinations(range(0, len(v)), 2):
                     reagent_a = v.iloc[a]
                     reagent_b = v.iloc[b]
+                    
+                    # Skip if same molecule
                     if reagent_a.SMILES == reagent_b.SMILES:
                         continue
                     
-                    # Sort by SMILES for canonical ordering
+                    # Sort by SMILES for canonical ordering (matching original)
                     reagent_a, reagent_b = sorted([reagent_a, reagent_b], key=lambda x: x.SMILES)
+                    
+                    # Calculate delta
                     delta = reagent_b.pIC50 - reagent_a.pIC50
+                    
+                    # Create transform string - ensure proper formatting with *-
                     transform_str = f"{reagent_a.R_group.replace('*', '*-')}>>{reagent_b.R_group.replace('*', '*-')}"
                     
+                    # Append to delta_list - matching original format exactly
                     delta_list.append([
                         reagent_a.SMILES, reagent_a.Core, reagent_a.R_group, reagent_a.Name, reagent_a.pIC50,
                         reagent_b.SMILES, reagent_b.Core, reagent_b.R_group, reagent_b.Name, reagent_b.pIC50,
@@ -346,6 +365,7 @@ if RDKIT_AVAILABLE:
             st.error("No molecular pairs found")
             return None, None
         
+        # Create DataFrame with matching column names
         cols = [
             "SMILES_1", "Core_1", "R_group_1", "Name_1", "pIC50_1",
             "SMILES_2", "Core_2", "Rgroup_2", "Name_2", "pIC50_2",
@@ -359,6 +379,7 @@ if RDKIT_AVAILABLE:
         
         mmp_list = []
         for k, v in delta_df.groupby("Transform"):
+            # Only include transforms with minimum occurrences
             if len(v) >= min_transform_occurrence:
                 mmp_list.append([k, len(v), v.Delta.values])
         
@@ -366,6 +387,7 @@ if RDKIT_AVAILABLE:
             st.warning(f"No transforms found with {min_transform_occurrence}+ occurrences")
             return delta_df, None
         
+        # Create transforms DataFrame
         mmp_df = pd.DataFrame(mmp_list, columns=["Transform", "Count", "Deltas"])
         mmp_df['idx'] = range(0, len(mmp_df))
         mmp_df['mean_delta'] = [x.mean() for x in mmp_df.Deltas]
@@ -374,10 +396,24 @@ if RDKIT_AVAILABLE:
         rxn_mols = []
         for transform in mmp_df['Transform']:
             try:
+                # Try to create reaction from SMARTS
                 rxn = AllChem.ReactionFromSmarts(transform.replace('*-', '*'), useSmiles=True)
                 rxn_mols.append(rxn)
-            except:
-                rxn_mols.append(None)
+            except Exception as e:
+                # If that fails, try alternative approach
+                try:
+                    # Try with different formatting
+                    parts = transform.split('>>')
+                    if len(parts) == 2:
+                        left = parts[0].replace('*-', '*')
+                        right = parts[1].replace('*-', '*')
+                        rxn_smarts = f"{left}>>{right}"
+                        rxn = AllChem.ReactionFromSmarts(rxn_smarts, useSmiles=True)
+                        rxn_mols.append(rxn)
+                    else:
+                        rxn_mols.append(None)
+                except:
+                    rxn_mols.append(None)
         
         mmp_df['rxn_mol'] = rxn_mols
         
@@ -501,8 +537,8 @@ if not RDKIT_AVAILABLE:
     
 elif uploaded_file is not None:
     # Get parameters from sidebar
-    sanitize = st.sidebar.checkbox("Sanitize molecules", value=True) if 'sanitize_molecules' not in locals() else sanitize_molecules
-    kekulize = st.sidebar.checkbox("Kekulize molecules", value=False) if 'kekulize_molecules' not in locals() else kekulize_molecules
+    sanitize = sanitize_molecules
+    kekulize = kekulize_molecules
     
     # Load data
     df = load_data(uploaded_file, sanitize=sanitize, kekulize=kekulize)
@@ -525,14 +561,15 @@ elif uploaded_file is not None:
         
         if delta_df is not None:
             # Show statistics
+            st.success("Analysis complete!")
             col1, col2, col3 = st.columns(3)
-            col1.metric("Total Pairs", len(delta_df))
+            col1.metric("Total Pairs Generated", len(delta_df))
             
             if mmp_df is not None:
                 col2.metric("Unique Transforms", len(mmp_df))
                 col3.metric("Avg Transform Frequency", f"{mmp_df['Count'].mean():.1f}")
                 
-                # Sort transforms
+                # Sort transforms by mean delta
                 mmp_df_sorted = mmp_df.sort_values("mean_delta", ascending=False)
                 
                 # Show top positive transforms
@@ -646,7 +683,7 @@ elif uploaded_file is not None:
                     else:
                         display_df = mmp_df_sorted.head(transforms_to_display)
                     
-                    # Simple table display (avoiding complex HTML with images)
+                    # Simple table display
                     st.dataframe(display_df[['Transform', 'Count', 'mean_delta']].rename(
                         columns={'mean_delta': 'Mean ΔpIC50'}
                     ).round(3))
@@ -728,6 +765,11 @@ else:
     C1=CC=C(C=C1)C=O,benzaldehyde,3.8
     ...
     ```
+    
+    ### Key Logic:
+    - **Pairs are generated only when 3+ compounds share the same core**
+    - This reduces noise and focuses on statistically significant transformations
+    - Consistent with standard MMP analysis methodologies
     
     ### Troubleshooting:
     If you encounter errors:
