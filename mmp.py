@@ -1,298 +1,478 @@
-# streamlit_mmp_app.py
 import streamlit as st
 import pandas as pd
-import numpy as np
 from rdkit import Chem
-from rdkit.Chem import AllChem, Draw
+from rdkit.Chem import AllChem, Draw, rdMolDraw2D
 from rdkit.Chem.Draw import rdMolDraw2D
-from rdkit.Chem.rdMMPA import FragmentMol
 import matplotlib.pyplot as plt
 import seaborn as sns
-import io
-from operator import itemgetter
-from itertools import combinations
+import numpy as np
+from io import BytesIO
 import base64
-import useful_rdkit_utils as uru  # you used this in original notebook
-from functools import partial
+from PIL import Image
+import io
+from itertools import combinations
+from operator import itemgetter
+import tempfile
+import os
 
-# ========== UI setup ==========
-st.set_page_config(layout="wide", page_title="MMP Analysis (Streamlit)")
-st.title("🔁 Matched Molecular Pair (MMP) Analysis — Streamlit")
-st.markdown(
-    "Upload a CSV with columns `SMILES`, `Name`, `pIC50`. "
-    "This app will find cores + R-groups, build MMP transforms, and summarize frequent transforms."
+# Set page config
+st.set_page_config(
+    page_title="MMP Analysis",
+    page_icon="🧪",
+    layout="wide"
 )
 
-# ========== Helper functions ==========
+# Title
+st.title("🧪 Matched Molecular Pair (MMP) Analysis")
+st.markdown("""
+This app performs Matched Molecular Pair analysis to identify structural transformations 
+that influence compound potency (pIC50 values).
+""")
+
+# Sidebar for file upload and parameters
+st.sidebar.header("📁 Data Input")
+
+uploaded_file = st.sidebar.file_uploader(
+    "Upload your CSV file with columns: SMILES, Name, pIC50",
+    type=['csv']
+)
+
+# Example data in sidebar
+st.sidebar.markdown("### 📋 Expected CSV Format")
+st.sidebar.code("""SMILES,Name,pIC50
+Cc1ccc(cc1)S(=O)(=O)N,Compound1,7.2
+COc1ccc(cc1)S(=O)(=O)N,Compound2,7.8
+...""")
+
+# Parameters in sidebar
+st.sidebar.header("⚙️ Parameters")
+min_transform_occurrence = st.sidebar.slider(
+    "Minimum transform occurrences",
+    min_value=1,
+    max_value=20,
+    value=5,
+    help="Only consider transformations that occur at least this many times"
+)
+
+num_top_transforms = st.sidebar.slider(
+    "Number of top transforms to display",
+    min_value=3,
+    max_value=10,
+    value=3
+)
+
+# Function definitions
 def remove_map_nums(mol):
+    """Remove atom map numbers from a molecule"""
     for atm in mol.GetAtoms():
         atm.SetAtomMapNum(0)
+    return mol
 
 def sort_fragments(mol):
-    """Return fragments sorted by atom count descending (largest first)."""
+    """
+    Transform a molecule with multiple fragments into a list of molecules 
+    that is sorted by number of atoms from largest to smallest
+    """
     frag_list = list(Chem.GetMolFrags(mol, asMols=True))
-    [remove_map_nums(x) for x in frag_list]
+    frag_list = [remove_map_nums(x) for x in frag_list]
     frag_num_atoms_list = [(x.GetNumAtoms(), x) for x in frag_list]
     frag_num_atoms_list.sort(key=itemgetter(0), reverse=True)
     return [x[1] for x in frag_num_atoms_list]
 
-@st.cache_data(show_spinner=False)
-def read_and_prepare(df):
-    """Given uploaded DataFrame ensure columns and compute RDKit molecules and largest fragment."""
-    # Ensure correct column names
-    needed = ["SMILES", "Name", "pIC50"]
-    if not all(c in df.columns for c in needed):
-        # try to interpret columns if uploaded file has no headers
-        if df.shape[1] >= 3:
-            df = df.copy()
-            df.columns = df.columns[:3]  # preserve extra col names if present
-            df = df.rename(columns={df.columns[0]: "SMILES", df.columns[1]: "Name", df.columns[2]: "pIC50"})
+# Scaffold finder function (simplified version)
+def FragmentMol(mol, maxCuts=1):
+    """Simplified fragmentation function for MMP analysis"""
+    from rdkit.Chem.rdMMPA import FragmentMol as RDKitFragmentMol
+    return RDKitFragmentMol(mol, maxCuts=maxCuts)
+
+def get_largest_fragment(mol):
+    """Get the largest fragment from a molecule"""
+    frags = Chem.GetMolFrags(mol, asMols=True)
+    if frags:
+        return max(frags, key=lambda x: x.GetNumAtoms())
+    return mol
+
+# Plotting functions
+def rxn_to_image(rxn_mol, width=300, height=150):
+    """Convert RDKit reaction to PIL Image"""
+    img = Draw.ReactionToImage(rxn_mol, subImgSize=(width, height))
+    return img
+
+def mol_to_image(mol, width=200, height=200):
+    """Convert RDKit molecule to PIL Image"""
+    img = Draw.MolToImage(mol, size=(width, height))
+    return img
+
+def create_stripplot(deltas, figsize=(4, 1.5)):
+    """Create a stripplot for delta distribution"""
+    fig, ax = plt.subplots(figsize=figsize)
+    sns.stripplot(x=deltas, ax=ax, jitter=0.3, alpha=0.7, s=8, color='steelblue')
+    ax.axvline(0, ls="--", c="red", alpha=0.7)
+    ax.set_xlim(-5, 5)
+    ax.set_xlabel("ΔpIC50")
+    ax.set_ylabel("")
+    ax.set_yticks([])
+    plt.tight_layout()
+    return fig
+
+def display_compound_grid(compounds_df, smiles_col="SMILES", id_col="Name", value_col="pIC50"):
+    """Display compounds in a grid format"""
+    n_cols = 4
+    n_rows = (len(compounds_df) + n_cols - 1) // n_cols
+    
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4*n_cols, 3*n_rows))
+    if n_rows == 1:
+        axes = [axes]
+    if n_cols == 1:
+        axes = [[ax] for ax in axes]
+    
+    for idx, (_, row) in enumerate(compounds_df.iterrows()):
+        row_idx = idx // n_cols
+        col_idx = idx % n_cols
+        
+        mol = Chem.MolFromSmiles(row[smiles_col])
+        if mol:
+            img = Draw.MolToImage(mol, size=(250, 250))
+            axes[row_idx][col_idx].imshow(img)
+            title = f"{row[id_col]}\n{value_col}: {row[value_col]:.2f}"
+            axes[row_idx][col_idx].set_title(title, fontsize=9)
         else:
-            raise ValueError("Input CSV must have at least three columns (SMILES, Name, pIC50)")
+            axes[row_idx][col_idx].text(0.5, 0.5, "Invalid SMILES", 
+                                       ha='center', va='center')
+        
+        axes[row_idx][col_idx].axis('off')
+    
+    # Hide empty subplots
+    for idx in range(len(compounds_df), n_rows * n_cols):
+        row_idx = idx // n_cols
+        col_idx = idx % n_cols
+        axes[row_idx][col_idx].axis('off')
+    
+    plt.tight_layout()
+    return fig
 
-    df = df[["SMILES", "Name", "pIC50"]].copy()
-    # Convert SMILES -> RDKit mol; standardize SMILES
-    df["mol"] = df.SMILES.apply(Chem.MolFromSmiles)
-    df = df[~df.mol.isna()].copy()
-    df["SMILES"] = df.mol.apply(Chem.MolToSmiles)
-    # Keep only largest fragment
-    df["mol"] = df.mol.apply(uru.get_largest_fragment)
-    return df.reset_index(drop=True)
-
-@st.cache_data(show_spinner=False)
-def decompose_all(df):
-    """Decompose each molecule into Core + Rgroup (using FragmentMol with maxCuts=1)."""
+# Main analysis function
+def run_mmp_analysis(df, min_occurrences=5):
+    """Main MMP analysis pipeline"""
+    
+    # Process molecules
+    df['mol'] = df['SMILES'].apply(Chem.MolFromSmiles)
+    df['mol'] = df['mol'].apply(get_largest_fragment)
+    
+    # Decompose molecules to scaffolds and sidechains
+    st.info("🔬 Decomposing molecules...")
+    progress_bar = st.progress(0)
+    
     row_list = []
-    for smiles, name, pIC50, mol in df[["SMILES", "Name", "pIC50", "mol"]].itertuples(index=False):
-        # use FragmentMol with maxCuts=1 to generate single cut fragments (core + R)
+    for idx, (smiles, name, pIC50, mol) in enumerate(df[['SMILES', 'Name', 'pIC50', 'mol']].values):
         frag_list = FragmentMol(mol, maxCuts=1)
         for _, frag_mol in frag_list:
             pair_list = sort_fragments(frag_mol)
-            # pair_list typically: [core, rgroups...], but with maxCuts=1 it should give 2 fragments
             tmp_list = [smiles] + [Chem.MolToSmiles(x) for x in pair_list] + [name, pIC50]
             row_list.append(tmp_list)
-    # determine column names dynamically: many pair_list items => we only expect Core and R_group (first two)
-    # But to be robust, we take the first two fragments only (core, R_group)
-    row_df = pd.DataFrame(row_list)
-    # Normalize to columns: SMILES, Core, R_group, Name, pIC50
-    if row_df.shape[1] >= 5:
-        row_df = row_df.iloc[:, :5]
-        row_df.columns = ["SMILES", "Core", "R_group", "Name", "pIC50"]
-    else:
-        raise ValueError("Fragmentation returned unexpected number of fragments per molecule.")
-    return row_df
-
-@st.cache_data(show_spinner=False)
-def build_delta_df(row_df):
-    """Given row_df with Core + R_group produce delta_df (pairs sharing same Core)."""
+        progress_bar.progress((idx + 1) / len(df))
+    
+    row_df = pd.DataFrame(row_list, columns=["SMILES", "Core", "R_group", "Name", "pIC50"])
+    
+    # Collect pairs with same scaffold
+    st.info("🤝 Finding molecular pairs...")
     delta_list = []
-    for core, group in row_df.groupby("Core"):
-        v = group.reset_index(drop=True)
-        if len(v) > 1:
-            for a, b in combinations(range(0, len(v)), 2):
+    
+    for k, v in row_df.groupby("Core"):
+        if len(v) > 2:
+            for a, b in combinations(range(len(v)), 2):
                 reagent_a = v.iloc[a]
                 reagent_b = v.iloc[b]
                 if reagent_a.SMILES == reagent_b.SMILES:
                     continue
-                # canonical order by SMILES (makes transform canonical)
                 reagent_a, reagent_b = sorted([reagent_a, reagent_b], key=lambda x: x.SMILES)
                 delta = reagent_b.pIC50 - reagent_a.pIC50
-                transform = f"{reagent_a.R_group.replace('*','*-')}>>{reagent_b.R_group.replace('*','*-')}"
-                delta_list.append(list(reagent_a.values) + list(reagent_b.values) + [transform, delta])
-    cols = ["SMILES_1","Core_1","R_group_1","Name_1","pIC50_1",
-           "SMILES_2","Core_2","R_group_2","Name_2","pIC50_2",
-           "Transform","Delta"]
+                delta_list.append(list(reagent_a.values) + list(reagent_b.values) +
+                                 [f"{reagent_a.R_group.replace('*', '*-')}>>{reagent_b.R_group.replace('*', '*-')}", delta])
+    
+    cols = ["SMILES_1", "Core_1", "R_group_1", "Name_1", "pIC50_1",
+           "SMILES_2", "Core_2", "Rgroup_1", "Name_2", "pIC50_2",
+           "Transform", "Delta"]
     delta_df = pd.DataFrame(delta_list, columns=cols)
-    return delta_df
-
-@st.cache_data(show_spinner=False)
-def build_mmp_df(delta_df, min_transform_occurrence=5):
-    """Aggregate transforms occurring >= min_transform_occurrence into mmp_df with Deltas, mean_delta, rxn_mol"""
+    
+    # Collect frequently occurring pairs
+    st.info("📊 Analyzing transformations...")
     mmp_list = []
-    for transform, v in delta_df.groupby("Transform"):
-        if len(v) >= min_transform_occurrence:
-            mmp_list.append([transform, len(v), v.Delta.values])
-    mmp_df = pd.DataFrame(mmp_list, columns=["Transform","Count","Deltas"])
-    if mmp_df.empty:
-        return mmp_df
-    mmp_df = mmp_df.reset_index(drop=True)
-    mmp_df["idx"] = mmp_df.index
-    mmp_df["mean_delta"] = mmp_df["Deltas"].apply(lambda arr: np.mean(arr))
-    # Some transforms include the '*-' escaped form; convert back to reaction SMARTS and create RDKit reaction
-    def make_rxn(transform):
-        try:
-            smt = transform.replace('*-','*')
-            rxn = AllChem.ReactionFromSmarts(smt, useSmiles=True)
-            return rxn
-        except Exception:
-            return None
-    mmp_df["rxn_mol"] = mmp_df.Transform.apply(make_rxn)
-    # map idx back to delta_df
-    transform_dict = dict(mmp_df[["Transform","idx"]].values)
-    delta_df["idx"] = delta_df.Transform.map(transform_dict)
-    return mmp_df, delta_df
+    for k, v in delta_df.groupby("Transform"):
+        if len(v) > min_occurrences:
+            mmp_list.append([k, len(v), v.Delta.values])
+    
+    mmp_df = pd.DataFrame(mmp_list, columns=["Transform", "Count", "Deltas"])
+    mmp_df['idx'] = range(len(mmp_df))
+    mmp_df['mean_delta'] = [x.mean() for x in mmp_df.Deltas]
+    mmp_df['rxn_mol'] = mmp_df.Transform.apply(
+        lambda x: AllChem.ReactionFromSmarts(x.replace('*-', '*'), useSmiles=True) if x else None
+    )
+    
+    return df, row_df, delta_df, mmp_df
 
-def rxn_image_bytes(rxn, subImgSize=(300,150)):
-    """Return PNG bytes for RDKit reaction object (or None)."""
-    if rxn is None:
-        return None
+# Main app logic
+if uploaded_file is not None:
     try:
-        pil = Draw.ReactionToImage(rxn, subImgSize=subImgSize)
-        buf = io.BytesIO()
-        pil.save(buf, format="PNG")
-        return buf.getvalue()
-    except Exception:
-        # fallback: draw using rdMolDraw2D
-        try:
-            drawer = rdMolDraw2D.MolDraw2DCairo(subImgSize[0], subImgSize[1])
-            drawer.DrawReaction(rxn)
-            drawer.FinishDrawing()
-            png = drawer.GetDrawingText()
-            return png
-        except Exception:
-            return None
+        # Load data
+        df = pd.read_csv(uploaded_file)
+        
+        # Check required columns
+        required_cols = ['SMILES', 'Name', 'pIC50']
+        if not all(col in df.columns for col in required_cols):
+            st.error(f"CSV file must contain columns: {required_cols}")
+            st.stop()
+        
+        # Display data preview
+        st.header("📊 Data Preview")
+        st.dataframe(df.head(), use_container_width=True)
+        st.write(f"Total compounds: {len(df)}")
+        
+        # Run MMP analysis
+        with st.spinner("Running MMP analysis..."):
+            df_processed, row_df, delta_df, mmp_df = run_mmp_analysis(df, min_transform_occurrence)
+        
+        st.success(f"✅ Analysis complete! Found {len(mmp_df)} significant transformations")
+        
+        # Display results in tabs
+        tab1, tab2, tab3, tab4 = st.tabs(["📈 Top Transforms", "📉 Bottom Transforms", "🔍 All Transforms", "📥 Export"])
+        
+        with tab1:
+            st.header("🏆 Top Potency-Enhancing Transformations")
+            
+            if len(mmp_df) > 0:
+                # Sort by mean_delta descending for positive effects
+                top_positive = mmp_df.sort_values('mean_delta', ascending=False).head(num_top_transforms)
+                
+                for i, (idx, row) in enumerate(top_positive.iterrows()):
+                    col1, col2, col3 = st.columns([2, 2, 3])
+                    
+                    with col1:
+                        st.subheader(f"Rank #{i+1}")
+                        st.write(f"**Transform:** `{row['Transform']}`")
+                        st.write(f"**Mean ΔpIC50:** {row['mean_delta']:.3f}")
+                        st.write(f"**Occurrences:** {row['Count']}")
+                    
+                    with col2:
+                        # Display reaction
+                        if row['rxn_mol']:
+                            img = rxn_to_image(row['rxn_mol'], width=400, height=200)
+                            st.image(img, caption="Reaction Transform")
+                    
+                    with col3:
+                        # Display stripplot
+                        fig = create_stripplot(row['Deltas'], figsize=(4, 2))
+                        st.pyplot(fig)
+                    
+                    # Show example compounds for this transform
+                    transform_idx = row['idx']
+                    compound_pairs = delta_df[delta_df['idx'] == transform_idx].head(3)
+                    
+                    if not compound_pairs.empty:
+                        st.markdown("**Example Compound Pairs:**")
+                        examples_data = []
+                        for _, pair in compound_pairs.iterrows():
+                            examples_data.extend([
+                                {'SMILES': pair['SMILES_1'], 'Name': pair['Name_1'], 'pIC50': pair['pIC50_1']},
+                                {'SMILES': pair['SMILES_2'], 'Name': pair['Name_2'], 'pIC50': pair['pIC50_2']}
+                            ])
+                        
+                        examples_df = pd.DataFrame(examples_data)
+                        fig = display_compound_grid(examples_df)
+                        st.pyplot(fig)
+                    
+                    st.markdown("---")
+            else:
+                st.warning("No significant transformations found. Try lowering the minimum occurrence threshold.")
+        
+        with tab2:
+            st.header("⚠️ Top Potency-Diminishing Transformations")
+            
+            if len(mmp_df) > 0:
+                # Sort by mean_delta ascending for negative effects
+                top_negative = mmp_df.sort_values('mean_delta', ascending=True).head(num_top_transforms)
+                
+                for i, (idx, row) in enumerate(top_negative.iterrows()):
+                    col1, col2, col3 = st.columns([2, 2, 3])
+                    
+                    with col1:
+                        st.subheader(f"Rank #{i+1}")
+                        st.write(f"**Transform:** `{row['Transform']}`")
+                        st.write(f"**Mean ΔpIC50:** {row['mean_delta']:.3f}")
+                        st.write(f"**Occurrences:** {row['Count']}")
+                    
+                    with col2:
+                        # Display reaction
+                        if row['rxn_mol']:
+                            img = rxn_to_image(row['rxn_mol'], width=400, height=200)
+                            st.image(img, caption="Reaction Transform")
+                    
+                    with col3:
+                        # Display stripplot
+                        fig = create_stripplot(row['Deltas'], figsize=(4, 2))
+                        st.pyplot(fig)
+                    
+                    # Show example compounds for this transform
+                    transform_idx = row['idx']
+                    compound_pairs = delta_df[delta_df['idx'] == transform_idx].head(3)
+                    
+                    if not compound_pairs.empty:
+                        st.markdown("**Example Compound Pairs:**")
+                        examples_data = []
+                        for _, pair in compound_pairs.iterrows():
+                            examples_data.extend([
+                                {'SMILES': pair['SMILES_1'], 'Name': pair['Name_1'], 'pIC50': pair['pIC50_1']},
+                                {'SMILES': pair['SMILES_2'], 'Name': pair['Name_2'], 'pIC50': pair['pIC50_2']}
+                            ])
+                        
+                        examples_df = pd.DataFrame(examples_data)
+                        fig = display_compound_grid(examples_df)
+                        st.pyplot(fig)
+                    
+                    st.markdown("---")
+        
+        with tab3:
+            st.header("📋 All Significant Transformations")
+            
+            if len(mmp_df) > 0:
+                # Sort all transforms by mean_delta
+                mmp_df_sorted = mmp_df.sort_values('mean_delta', ascending=False)
+                
+                # Display as table
+                display_df = mmp_df_sorted[['Transform', 'Count', 'mean_delta']].copy()
+                display_df['mean_delta'] = display_df['mean_delta'].round(3)
+                display_df.columns = ['Transform', 'Occurrences', 'Mean ΔpIC50']
+                
+                st.dataframe(
+                    display_df,
+                    use_container_width=True,
+                    column_config={
+                        "Transform": st.column_config.TextColumn("Transform", width="large"),
+                        "Occurrences": st.column_config.NumberColumn("Occurrences", width="small"),
+                        "Mean ΔpIC50": st.column_config.NumberColumn("Mean ΔpIC50", width="small",
+                                                                     format="%.3f")
+                    }
+                )
+                
+                # Distribution plot of all mean deltas
+                st.subheader("Distribution of Transformation Effects")
+                fig, ax = plt.subplots(figsize=(10, 4))
+                ax.hist(mmp_df_sorted['mean_delta'], bins=20, alpha=0.7, color='steelblue', edgecolor='black')
+                ax.axvline(x=0, color='red', linestyle='--', alpha=0.7)
+                ax.set_xlabel('Mean ΔpIC50')
+                ax.set_ylabel('Frequency')
+                ax.set_title('Distribution of Transformation Effects')
+                ax.grid(True, alpha=0.3)
+                st.pyplot(fig)
+            else:
+                st.warning("No significant transformations found.")
+        
+        with tab4:
+            st.header("💾 Export Results")
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                # Export mmp_df
+                csv1 = mmp_df.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download Transformations (CSV)",
+                    data=csv1,
+                    file_name="mmp_transformations.csv",
+                    mime="text/csv"
+                )
+            
+            with col2:
+                # Export delta_df
+                csv2 = delta_df.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download All Pairs (CSV)",
+                    data=csv2,
+                    file_name="mmp_pairs.csv",
+                    mime="text/csv"
+                )
+            
+            with col3:
+                # Export summary statistics
+                summary_stats = {
+                    'Total Compounds': len(df),
+                    'Total Pairs': len(delta_df),
+                    'Significant Transforms': len(mmp_df),
+                    'Avg Mean ΔpIC50': mmp_df['mean_delta'].mean() if len(mmp_df) > 0 else 0,
+                    'Most Positive Transform': mmp_df.loc[mmp_df['mean_delta'].idxmax(), 'Transform'] if len(mmp_df) > 0 else 'N/A',
+                    'Most Negative Transform': mmp_df.loc[mmp_df['mean_delta'].idxmin(), 'Transform'] if len(mmp_df) > 0 else 'N/A'
+                }
+                
+                summary_df = pd.DataFrame(list(summary_stats.items()), columns=['Metric', 'Value'])
+                csv3 = summary_df.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download Summary (CSV)",
+                    data=csv3,
+                    file_name="mmp_summary.csv",
+                    mime="text/csv"
+                )
+            
+            # Display summary
+            st.subheader("Summary Statistics")
+            st.json(summary_stats)
+    
+    except Exception as e:
+        st.error(f"An error occurred: {str(e)}")
+        st.exception(e)
 
-def plot_delta_strip(dist, ax=None):
-    if ax is None:
-        fig, ax = plt.subplots(figsize=(4,1))
-    sns.stripplot(x=dist, jitter=0.2, alpha=0.7)
-    ax.axvline(0, ls="--", color="red")
-    ax.set_xlim(-5,5)
-    ax.set_xlabel("ΔpIC50")
-    ax.set_yticks([])
-    return ax
+else:
+    # Show instructions when no file is uploaded
+    st.info("👈 Please upload a CSV file to begin analysis")
+    
+    # Example section
+    st.header("🎯 How to Use This App")
+    
+    st.markdown("""
+    1. **Prepare your data** in a CSV file with columns: `SMILES`, `Name`, `pIC50`
+    2. **Upload the file** using the file uploader in the sidebar
+    3. **Adjust parameters** (optional):
+       - Minimum transform occurrences
+       - Number of top transforms to display
+    4. **Explore results** in the different tabs:
+       - 📈 Top Transforms: Most potency-enhancing transformations
+       - 📉 Bottom Transforms: Most potency-diminishing transformations
+       - 📋 All Transforms: Complete list of significant transformations
+       - 📥 Export: Download results for further analysis
+    """)
+    
+    # Quick demo with example data
+    st.header("🚀 Quick Demo")
+    if st.button("Run with example data"):
+        # Create example data
+        example_data = {
+            'SMILES': [
+                'Cc1ccc(cc1)S(=O)(=O)N',
+                'COc1ccc(cc1)S(=O)(=O)N',
+                'CFc1ccc(cc1)S(=O)(=O)N',
+                'CCc1ccc(cc1)S(=O)(=O)N',
+                'CCOc1ccc(cc1)S(=O)(=O)N',
+                'CNc1ccc(cc1)S(=O)(=O)N',
+            ],
+            'Name': ['Compound1', 'Compound2', 'Compound3', 'Compound4', 'Compound5', 'Compound6'],
+            'pIC50': [7.2, 7.8, 6.9, 7.5, 8.1, 6.5]
+        }
+        
+        df_example = pd.DataFrame(example_data)
+        
+        # Save to temp file and run analysis
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+            df_example.to_csv(f.name, index=False)
+            uploaded_file = f.name
+        
+        st.rerun()
 
-# ========== Sidebar: upload & options ==========
-st.sidebar.header("Input / Options")
-uploaded_file = st.sidebar.file_uploader("Upload SMILES CSV (.csv or .smi)", type=["csv","smi"])
-min_occ = st.sidebar.slider("Minimum transform occurrences",  min_value=2, max_value=50, value=5, step=1)
-show_top_n = st.sidebar.number_input("Number of top transforms to display", value=5, min_value=1, max_value=50, step=1)
-
-if uploaded_file is None:
-    st.info("Upload a SMILES CSV to start. Example columns: SMILES, Name, pIC50.")
-    st.stop()
-
-# ========== Load data ==========
-try:
-    raw_df = pd.read_csv(uploaded_file, header=0)
-except Exception:
-    # try reading without header; fallback
-    uploaded_file.seek(0)
-    raw_df = pd.read_csv(uploaded_file, header=None)
-
-try:
-    df = read_and_prepare(raw_df)
-except Exception as e:
-    st.error(f"Failed to read/prepare file: {e}")
-    st.stop()
-
-st.success(f"Loaded {len(df)} molecules.")
-with st.expander("Show input table (first 20 rows)"):
-    st.dataframe(df[["SMILES","Name","pIC50"]].head(20))
-
-# ========== Run decomposition and MMP pipeline ==========
-with st.spinner("Decomposing molecules into core + R-groups..."):
-    row_df = decompose_all(df)
-st.write(f"Fragments produced: {len(row_df)} rows.")
-with st.expander("Show fragment decomposition (first 30 rows)"):
-    st.dataframe(row_df.head(30))
-
-with st.spinner("Building matched molecular pairs (MMP) delta table..."):
-    delta_df = build_delta_df(row_df)
-st.write(f"Pairs sharing same core: {len(delta_df)}")
-if delta_df.empty:
-    st.error("No pairs found that share the same core. Check your input or lower min transform occurrence.")
-    st.stop()
-
-with st.expander("Show delta table (first 50 rows)"):
-    st.dataframe(delta_df.head(50))
-
-with st.spinner("Aggregating transforms into MMP table..."):
-    mmp_df, delta_df = build_mmp_df(delta_df, min_transform_occurrence=min_occ)
-if mmp_df.empty:
-    st.warning(f"No transforms found with min occurrence >= {min_occ}. Try lowering the threshold.")
-    st.stop()
-
-st.write(f"Found {len(mmp_df)} frequent transforms (occurrence >= {min_occ}).")
-with st.expander("Show MMP DataFrame (first 50 rows)"):
-    show_df = mmp_df[["Transform","Count","mean_delta"]].copy()
-    show_df["mean_delta"] = show_df["mean_delta"].round(3)
-    st.dataframe(show_df.head(50))
-
-# ========== Top positive / negative transforms ==========
-st.header("Top transforms — positive (increase pIC50) and negative (decrease pIC50)")
-
-col1, col2 = st.columns(2)
-
-with col1:
-    st.subheader(f"Top {show_top_n} positive transforms")
-    top_pos = mmp_df.sort_values("mean_delta", ascending=False).head(show_top_n)
-    for _, row in top_pos.iterrows():
-        st.markdown(f"**Transform:** `{row['Transform']}`  \n**Count:** {row['Count']}  **Mean ΔpIC50:** {row['mean_delta']:.3f}")
-        img_bytes = rxn_image_bytes(row["rxn_mol"])
-        if img_bytes is not None:
-            st.image(img_bytes, width=300)
-        # plot distribution inline
-        fig, ax = plt.subplots(figsize=(4,1.2))
-        plot_delta_strip(row["Deltas"], ax=ax)
-        st.pyplot(fig)
-        st.write("---")
-
-with col2:
-    st.subheader(f"Top {show_top_n} negative transforms")
-    top_neg = mmp_df.sort_values("mean_delta", ascending=True).head(show_top_n)
-    for _, row in top_neg.iterrows():
-        st.markdown(f"**Transform:** `{row['Transform']}`  \n**Count:** {row['Count']}  **Mean ΔpIC50:** {row['mean_delta']:.3f}")
-        img_bytes = rxn_image_bytes(row["rxn_mol"])
-        if img_bytes is not None:
-            st.image(img_bytes, width=300)
-        fig, ax = plt.subplots(figsize=(4,1.2))
-        plot_delta_strip(row["Deltas"], ax=ax)
-        st.pyplot(fig)
-        st.write("---")
-
-# ========== Interactive: choose transform to inspect examples ==========
-st.header("Inspect examples for a selected transform")
-sel_transform = st.selectbox("Pick a transform (or search paste)", options=mmp_df.Transform.tolist())
-if sel_transform:
-    sel_row = mmp_df[mmp_df.Transform == sel_transform].iloc[0]
-    st.markdown(f"**Selected transform:** `{sel_transform}`  \n**Count:** {sel_row['Count']}  **Mean ΔpIC50:** {sel_row['mean_delta']:.3f}")
-    img_bytes = rxn_image_bytes(sel_row["rxn_mol"])
-    if img_bytes is not None:
-        st.image(img_bytes, width=350)
-
-    # show all pairs (from delta_df)
-    ex_pairs = delta_df[delta_df.idx == sel_row.idx].copy()
-    # display a compact example table with SMILES + names + delta
-    display_df = ex_pairs[["SMILES_1","Name_1","pIC50_1","SMILES_2","Name_2","pIC50_2","Delta"]].copy()
-    st.dataframe(display_df.head(50))
-    # downloadable CSV / excel
-    csv = display_df.to_csv(index=False).encode("utf-8")
-    st.download_button("Download example pairs CSV", csv, file_name="mmp_examples.csv", mime="text/csv")
-
-# ========== Utilities: download entire outputs ==========
-st.header("Download results")
-
-col_a, col_b = st.columns(2)
-with col_a:
-    csv_all_mmp = mmp_df.to_csv(index=False).encode("utf-8")
-    st.download_button("Download mmp_df (CSV)", csv_all_mmp, file_name="mmp_df.csv", mime="text/csv")
-with col_b:
-    csv_delta = delta_df.to_csv(index=False).encode("utf-8")
-    st.download_button("Download delta_df (CSV)", csv_delta, file_name="delta_df.csv", mime="text/csv")
-
-# offer XLSX
-def to_excel_bytes(dfs: dict):
-    """dfs: name->df"""
-    out = io.BytesIO()
-    with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
-        for name, d in dfs.items():
-            d.to_excel(writer, sheet_name=name[:31], index=False)
-        writer.save()
-    return out.getvalue()
-
-xlsx_bytes = to_excel_bytes({"mmp_df": mmp_df, "delta_df": delta_df})
-st.download_button("Download all results (Excel)", xlsx_bytes, file_name="mmp_results.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-st.write("---")
-st.markdown("App adapted from your Colab MMP analysis notebook. If you'd like, I can add: (1) molecule thumbnails in tables, (2) more flexible fragmentation (maxCuts>1), (3) interactive plotting of transform-level statistics, or (4) saving large combined figures (png) as in the notebook.")
+# Footer
+st.markdown("---")
+st.markdown(
+    """
+    <div style='text-align: center'>
+        <p>Built with ❤️ using Streamlit & RDKit | Matched Molecular Pair Analysis</p>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
