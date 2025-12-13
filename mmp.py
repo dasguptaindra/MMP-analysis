@@ -60,13 +60,6 @@ st.markdown("""
         border-radius: 5px;
         margin: 1rem 0;
     }
-    .info-box {
-        background-color: #EFF6FF;
-        border-left: 4px solid #3B82F6;
-        padding: 1rem;
-        border-radius: 5px;
-        margin: 1rem 0;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -76,15 +69,8 @@ st.markdown('<h1 class="main-header">🧪 Matched Molecular Pair (MMP) Analysis 
 # Try to import RDKit with error handling
 try:
     from rdkit import Chem
-    from rdkit.Chem import AllChem, Draw, rdMolDescriptors
+    from rdkit.Chem import AllChem, Draw
     from rdkit.Chem.Draw import rdMolDraw2D
-    # Try to import RDKit MMPA module
-    try:
-        from rdkit.Chem.rdMMPA import FragmentMol as RDKitFragmentMol
-        RDKIT_MMPA_AVAILABLE = True
-    except ImportError:
-        RDKIT_MMPA_AVAILABLE = False
-        st.warning("RDKit MMPA module not available. Using legacy fragmentation method.")
     RDKIT_AVAILABLE = True
 except ImportError as e:
     st.error(f"RDKit not available: {e}")
@@ -116,55 +102,6 @@ with st.sidebar:
         st.markdown("### ⚙️ Parameters")
         min_occurrence = st.slider("Minimum transform occurrences", 1, 20, 5, 
                                   help="Minimum number of occurrences for a transform to be considered")
-        
-        # Fragmentation Method Selection
-        st.markdown("### ✂️ Fragmentation Method")
-        
-        fragmentation_method = st.selectbox(
-            "Fragmentation algorithm",
-            options=["RDKit MMPA (Recommended)", "Legacy Method", "Auto-select"],
-            index=0,
-            help="""RDKit MMPA: Uses RDKit's optimized fragmentation algorithm (fastest)
-                   Legacy Method: Original bond-breaking method (more control)
-                   Auto-select: Automatically chooses the best method"""
-        )
-        
-        # CUTS PARAMETER - Only show for RDKit MMPA
-        if fragmentation_method != "Legacy Method" and RDKIT_MMPA_AVAILABLE:
-            max_cuts = st.selectbox(
-                "Maximum number of cuts",
-                options=[1, 2, 3, 4],
-                index=0,
-                help="Maximum number of cuts for RDKit MMPA algorithm"
-            )
-        else:
-            max_cuts = st.selectbox(
-                "Maximum number of cuts",
-                options=[1, 2, 3, 4, 5],
-                index=0,
-                help="Maximum number of bonds to break (Legacy method)"
-            )
-        
-        # Advanced fragmentation options
-        st.markdown("#### Advanced Fragmentation")
-        
-        if fragmentation_method == "Legacy Method":
-            fragmentation_strategy = st.selectbox(
-                "Fragmentation strategy",
-                options=["Single cuts only", "All cuts up to max", "Smart fragmentation"],
-                index=0,
-                help="""Single cuts only: Break only one bond per molecule
-                       All cuts up to max: Try all combinations up to max cuts
-                       Smart fragmentation: Only cut at rotatable bonds"""
-            )
-        else:
-            fragmentation_strategy = "RDKit MMPA"
-        
-        include_rings = st.checkbox(
-            "Allow cutting ring bonds", 
-            value=False,
-            help="Allow fragmentation that breaks ring structures (may create unrealistic transformations)"
-        )
         
         # Molecule cleaning options
         st.markdown("### 🧹 Molecule Cleaning")
@@ -211,11 +148,6 @@ with st.sidebar:
         2. Find pairs with same core but different R-groups
         3. Calculate ΔpIC50 for each pair
         4. Identify frequently occurring transformations
-        
-        **Fragmentation Methods:**
-        - **RDKit MMPA**: Optimized algorithm for efficient fragmentation
-        - **Legacy Method**: Manual bond breaking with full control
-        - **Number of cuts** controls fragmentation complexity
         """)
 
 # Helper functions (only define if RDKit is available)
@@ -306,198 +238,42 @@ if RDKIT_AVAILABLE:
         except Exception as e:
             return []
 
-    def validate_and_clean_fragments(frag_mol, min_atoms=3, max_ratio=10):
-        """Validate and clean fragmentation results"""
-        try:
-            frag_list = sort_fragments(frag_mol)
-            if len(frag_list) >= 2:
-                # Get the two largest fragments
-                main_frags = frag_list[:2]
-                min_frag_size = min(f.GetNumAtoms() for f in main_frags)
-                max_frag_size = max(f.GetNumAtoms() for f in main_frags)
-                
-                # Avoid extremely small fragments and extreme size ratios
-                if min_frag_size >= min_atoms and max_frag_size / min_frag_size < max_ratio:
-                    return True
-            return False
-        except:
-            return False
-
-    def fragment_mol_legacy(mol, maxCuts=1, strategy="single", include_rings=False):
-        """Legacy fragmentation method"""
+    def FragmentMol(mol, maxCuts=1):
+        """Simple fragmentation function - try to break single bonds"""
         results = []
         try:
             # Create a copy to avoid modifying original
             mol_copy = Chem.Mol(mol)
             
-            # Get all bonds that can be cut
-            bonds_to_consider = []
+            # Try to break single bonds
             for bond in mol_copy.GetBonds():
-                # Check bond type
                 if bond.GetBondType() == Chem.BondType.SINGLE:
-                    # Check if it's a ring bond
-                    is_ring_bond = bond.IsInRing()
-                    
-                    # Apply ring bond filtering
-                    if not include_rings and is_ring_bond:
-                        continue
-                    
-                    bonds_to_consider.append(bond)
-            
-            if strategy == "single" or maxCuts == 1:
-                # Single cuts only
-                for bond in bonds_to_consider:
                     try:
+                        # Create editable molecule
                         emol = Chem.EditableMol(mol_copy)
                         emol.RemoveBond(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())
                         frag_mol = emol.GetMol()
                         
+                        # Try to sanitize
                         try:
                             Chem.SanitizeMol(frag_mol)
                         except:
                             pass
                         
-                        if validate_and_clean_fragments(frag_mol):
-                            results.append((f"LEGACY_CUT_{bond.GetIdx()}", frag_mol))
+                        results.append((f"CUT_{bond.GetIdx()}", frag_mol))
                     except:
                         continue
-            
-            elif strategy == "all":
-                # All combinations up to maxCuts
-                for num_cuts in range(1, min(maxCuts, len(bonds_to_consider)) + 1):
-                    bond_combinations = list(combinations(bonds_to_consider, num_cuts))
-                    
-                    for bond_combo in bond_combinations:
-                        try:
-                            emol = Chem.EditableMol(mol_copy)
-                            bond_indices = []
-                            
-                            for bond in bond_combo:
-                                emol.RemoveBond(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())
-                                bond_indices.append(bond.GetIdx())
-                            
-                            frag_mol = emol.GetMol()
-                            
-                            try:
-                                Chem.SanitizeMol(frag_mol)
-                            except:
-                                pass
-                            
-                            if validate_and_clean_fragments(frag_mol):
-                                combo_str = f"LEGACY_CUTS_{'_'.join(map(str, sorted(bond_indices)))}"
-                                results.append((combo_str, frag_mol))
-                        except:
-                            continue
-            
-            elif strategy == "smart":
-                # Smart fragmentation - only cut at rotatable bonds
-                rotatable_bonds = []
-                for bond in bonds_to_consider:
-                    if not bond.IsInRing():
-                        begin_atom = bond.GetBeginAtom()
-                        end_atom = bond.GetEndAtom()
-                        
-                        if (begin_atom.GetDegree() > 1 and end_atom.GetDegree() > 1):
-                            # Simple rotatable bond check
-                            if not (begin_atom.IsInRing() and end_atom.IsInRing()):
-                                rotatable_bonds.append(bond)
-                
-                # Try single cuts on rotatable bonds
-                for bond in rotatable_bonds:
-                    try:
-                        emol = Chem.EditableMol(mol_copy)
-                        emol.RemoveBond(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())
-                        frag_mol = emol.GetMol()
-                        
-                        try:
-                            Chem.SanitizeMol(frag_mol)
-                        except:
-                            pass
-                        
-                        if validate_and_clean_fragments(frag_mol):
-                            results.append((f"SMART_CUT_{bond.GetIdx()}", frag_mol))
-                    except:
-                        continue
-            
-            # If no cuts were made, add the original molecule
-            if not results:
-                results.append(("NO_CUT", mol))
-            
-            return results
-            
         except Exception as e:
-            return [("ERROR", mol)]
-
-    def FragmentMol(mol, maxCuts=1, strategy="single", include_rings=False):
-        """Improved fragmentation using RDKit's MMPA module when available"""
-        results = []
+            pass
         
-        # Determine which fragmentation method to use
-        use_rdkit_mmpa = False
-        if RDKIT_MMPA_AVAILABLE and strategy != "Legacy Method":
-            if strategy == "RDKit MMPA" or (strategy == "Auto-select" and maxCuts <= 4):
-                use_rdkit_mmpa = True
-        
-        if use_rdkit_mmpa:
-            # Use RDKit MMPA
-            try:
-                # Adjust maxCuts for RDKit MMPA (typically 1-4)
-                actual_max_cuts = min(maxCuts, 4)
-                
-                # Get fragments using RDKit MMPA
-                fragments = RDKitFragmentMol(mol, maxCuts=actual_max_cuts)
-                
-                # Process fragments
-                for frag_set in fragments:
-                    if len(frag_set) >= 2:
-                        try:
-                            # Combine fragments into a single molecule for display
-                            combined = Chem.Mol(frag_set[0])
-                            for frag in frag_set[1:]:
-                                combined = Chem.CombineMols(combined, frag)
-                            
-                            # Clean up
-                            try:
-                                Chem.SanitizeMol(combined)
-                            except:
-                                pass
-                            
-                            # Validate the fragmentation
-                            if validate_and_clean_fragments(combined):
-                                # Determine number of cuts based on fragment count
-                                num_cuts = len(frag_set) - 1
-                                results.append((f"MMPA_{num_cuts}CUT", combined))
-                        except Exception as e:
-                            continue
-                
-                # If RDKit MMPA didn't produce results, fall back
-                if not results:
-                    return fragment_mol_legacy(mol, maxCuts, "single", include_rings)
-                    
-            except Exception as e:
-                # Fall back to legacy method
-                return fragment_mol_legacy(mol, maxCuts, strategy, include_rings)
-        else:
-            # Use legacy fragmentation
-            return fragment_mol_legacy(mol, maxCuts, strategy, include_rings)
+        # Return at least the original molecule
+        if not results:
+            results.append(("NO_CUT", mol))
         
         return results
 
-    def generate_rgroup_representations(core_smiles, rgroup_smiles):
-        """Generate better R-group representations"""
-        try:
-            # Simple labeling for now
-            if '*' in core_smiles and '*' in rgroup_smiles:
-                return (core_smiles.replace('*', '[*:1]'), 
-                        rgroup_smiles.replace('*', '[*:1]'))
-            return core_smiles, rgroup_smiles
-        except:
-            return core_smiles, rgroup_smiles
-
-    def perform_mmp_analysis(df, min_transform_occurrence, max_cuts=1, 
-                           fragmentation_strategy="single", include_rings=False,
-                           show_debug=False, fragmentation_method="Auto-select"):
-        """Perform MMP analysis with configurable cuts"""
+    def perform_mmp_analysis(df, min_transform_occurrence, show_debug=False):
+        """Perform MMP analysis matching the original logic EXACTLY"""
         if df is None or len(df) == 0:
             return None, None
         
@@ -505,28 +281,13 @@ if RDKIT_AVAILABLE:
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # Map method to strategy
-        if fragmentation_method == "RDKit MMPA (Recommended)":
-            strategy = "RDKit MMPA"
-        elif fragmentation_method == "Legacy Method":
-            strategy = fragmentation_strategy
-        else:  # Auto-select
-            strategy = "Auto-select"
-        
-        # Step 1: Decompose molecules
-        status_text.text(f"Step 1/4: Decomposing molecules ({fragmentation_method})...")
+        # Step 1: Decompose molecules - EXACTLY as in original
+        status_text.text("Step 1/4: Decomposing molecules...")
         progress_bar.progress(25)
         
         row_list = []
-        fragmentation_stats = {
-            "mmpa_single": 0,
-            "mmpa_multiple": 0,
-            "legacy_single": 0,
-            "legacy_multiple": 0,
-            "smart_cuts": 0,
-            "failed": 0,
-            "total": 0
-        }
+        successful = 0
+        failed = 0
         
         for idx, row in df.iterrows():
             smiles = row['SMILES']
@@ -534,84 +295,46 @@ if RDKIT_AVAILABLE:
             pIC50 = row['pIC50']
             mol = row['mol']
             
-            fragmentation_stats["total"] += 1
-            
             if mol is None:
-                fragmentation_stats["failed"] += 1
+                failed += 1
                 continue
                 
             try:
-                # Use improved fragmentation
-                frag_list = FragmentMol(mol, maxCuts=max_cuts, 
-                                      strategy=strategy, 
-                                      include_rings=include_rings)
-                
-                for frag_name, frag_mol in frag_list:
-                    # Update stats based on fragmentation type
-                    if "MMPA" in frag_name:
-                        if "1CUT" in frag_name:
-                            fragmentation_stats["mmpa_single"] += 1
-                        else:
-                            fragmentation_stats["mmpa_multiple"] += 1
-                    elif "LEGACY" in frag_name:
-                        if "CUTS_" in frag_name:
-                            fragmentation_stats["legacy_multiple"] += 1
-                        else:
-                            fragmentation_stats["legacy_single"] += 1
-                    elif "SMART" in frag_name:
-                        fragmentation_stats["smart_cuts"] += 1
-                    
-                    # Validate the fragmentation
-                    if validate_and_clean_fragments(frag_mol):
-                        # Convert to SMILES
+                frag_list = FragmentMol(mol, maxCuts=1)
+                for _, frag_mol in frag_list:
+                    pair_list = sort_fragments(frag_mol)
+                    if len(pair_list) >= 2:
+                        # Convert to SMILES with error handling
                         try:
-                            pair_list = sort_fragments(frag_mol)
-                            if len(pair_list) >= 2:
-                                # Generate better representations
-                                core_smiles = Chem.MolToSmiles(pair_list[0])
-                                rgroup_smiles = Chem.MolToSmiles(pair_list[1])
-                                
-                                tmp_list = [smiles, core_smiles, rgroup_smiles, 
-                                          name, pIC50, frag_name]
-                                row_list.append(tmp_list)
+                            core_smiles = Chem.MolToSmiles(pair_list[0])
+                            rgroup_smiles = Chem.MolToSmiles(pair_list[1])
+                            tmp_list = [smiles, core_smiles, rgroup_smiles, name, pIC50]
+                            row_list.append(tmp_list)
+                            successful += 1
                         except:
-                            fragmentation_stats["failed"] += 1
+                            failed += 1
             except Exception as e:
-                fragmentation_stats["failed"] += 1
+                failed += 1
                 continue
         
         if not row_list:
             st.error("No valid fragments found")
             return None, None
         
-        # Create DataFrame
-        row_df = pd.DataFrame(row_list, columns=["SMILES", "Core", "R_group", "Name", "pIC50", "Fragmentation_Type"])
-        
-        # Show fragmentation statistics
-        st.markdown(f"""
-        <div class="info-box">
-            <h4>📊 Fragmentation Statistics</h4>
-            <p><strong>Method Used:</strong> {fragmentation_method}</p>
-            <p><strong>Total molecules processed:</strong> {fragmentation_stats['total']}</p>
-            <p><strong>RDKit MMPA single cuts:</strong> {fragmentation_stats['mmpa_single']}</p>
-            <p><strong>RDKit MMPA multiple cuts:</strong> {fragmentation_stats['mmpa_multiple']}</p>
-            <p><strong>Legacy single cuts:</strong> {fragmentation_stats['legacy_single']}</p>
-            <p><strong>Legacy multiple cuts:</strong> {fragmentation_stats['legacy_multiple']}</p>
-            <p><strong>Smart cuts:</strong> {fragmentation_stats['smart_cuts']}</p>
-            <p><strong>Failed fragmentations:</strong> {fragmentation_stats['failed']}</p>
-            <p><strong>Valid fragments generated:</strong> {len(row_list)}</p>
-            <p><strong>Unique cores identified:</strong> {row_df['Core'].nunique()}</p>
-        </div>
-        """, unsafe_allow_html=True)
+        # Create DataFrame with EXACT same column order as original
+        row_df = pd.DataFrame(row_list, columns=["SMILES", "Core", "R_group", "Name", "pIC50"])
         
         if show_debug:
             with st.expander("Debug: Row DataFrame", expanded=False):
                 st.write(f"Total rows: {len(row_df)}")
                 st.dataframe(row_df.head(20))
-                st.write("Fragmentation types distribution:")
-                st.write(row_df['Fragmentation_Type'].value_counts())
+                st.write("Unique cores:", row_df['Core'].nunique())
+                st.write("Sample cores:", row_df['Core'].head(10).tolist())
         
-        # Step 2: Collect pairs
+        if failed > 0:
+            st.info(f"Successfully processed {successful} molecules, failed on {failed}")
+        
+        # Step 2: Collect pairs - MATCHING ORIGINAL EXACTLY
         status_text.text("Step 2/4: Collecting molecular pairs...")
         progress_bar.progress(50)
         
@@ -621,7 +344,7 @@ if RDKIT_AVAILABLE:
         
         # Group by Core and iterate through each group
         for k, v in row_df.groupby("Core"):
-            # Only process groups with more than 2 compounds
+            # CRITICAL: Only process groups with more than 2 compounds (matches original)
             if len(v) > 2:
                 cores_with_pairs += 1
                 # Generate all unique combinations of indices
@@ -632,38 +355,26 @@ if RDKIT_AVAILABLE:
                     reagent_a = v.iloc[a]
                     reagent_b = v.iloc[b]
                     
-                    # Skip if same molecule
+                    # Skip if same molecule (shouldn't happen with combinations but check anyway)
                     if reagent_a.SMILES == reagent_b.SMILES:
                         continue
                     
-                    # Sort by SMILES for canonical ordering
+                    # Sort by SMILES for canonical ordering (matches original)
                     reagent_a, reagent_b = sorted([reagent_a, reagent_b], key=lambda x: x.SMILES)
                     
                     # Calculate delta
                     delta = reagent_b.pIC50 - reagent_a.pIC50
                     
-                    # Generate better R-group representations
-                    core_a, rgroup_a = generate_rgroup_representations(
-                        reagent_a.Core, reagent_a.R_group
-                    )
-                    core_b, rgroup_b = generate_rgroup_representations(
-                        reagent_b.Core, reagent_b.R_group
-                    )
+                    # Create transform string - MATCH ORIGINAL FORMAT EXACTLY
+                    # Note: The replace('*','*-') is critical
+                    transform_str = f"{reagent_a.R_group.replace('*','*-')}>>{reagent_b.R_group.replace('*','*-')}"
                     
-                    # Create transform string
-                    transform_str = f"{rgroup_a.replace('*','*-')}>>{rgroup_b.replace('*','*-')}"
-                    
-                    # Store fragmentation type
-                    frag_type_a = reagent_a.Fragmentation_Type
-                    frag_type_b = reagent_b.Fragmentation_Type
-                    frag_types = f"{frag_type_a}|{frag_type_b}"
-                    
+                    # CRITICAL: Create the list in EXACT same order as original
+                    # Original code: list(reagent_a.values) + list(reagent_b.values) + [transform_str, delta]
                     delta_list.append([
-                        reagent_a.SMILES, reagent_a.Core, reagent_a.R_group, reagent_a.Name, 
-                        reagent_a.pIC50, frag_type_a,
-                        reagent_b.SMILES, reagent_b.Core, reagent_b.R_group, reagent_b.Name, 
-                        reagent_b.pIC50, frag_type_b,
-                        transform_str, delta, frag_types
+                        reagent_a.SMILES, reagent_a.Core, reagent_a.R_group, reagent_a.Name, reagent_a.pIC50,
+                        reagent_b.SMILES, reagent_b.Core, reagent_b.R_group, reagent_b.Name, reagent_b.pIC50,
+                        transform_str, delta
                     ])
         
         if show_debug:
@@ -671,16 +382,20 @@ if RDKIT_AVAILABLE:
                 st.write(f"Cores with >2 compounds: {cores_with_pairs}")
                 st.write(f"Total possible combinations: {total_combinations}")
                 st.write(f"Actual pairs generated: {len(delta_list)}")
+                if delta_list:
+                    st.write("First 3 pairs:")
+                    for i, pair in enumerate(delta_list[:3]):
+                        st.write(f"Pair {i+1}: {pair[:5]} ... {pair[5:10]} ... Δ={pair[-1]:.3f}")
         
         if not delta_list:
             st.error("No molecular pairs found")
             return None, None
         
-        # Create DataFrame
+        # Create DataFrame with EXACT same column names as expected
         cols = [
-            "SMILES_1", "Core_1", "R_group_1", "Name_1", "pIC50_1", "Frag_Type_1",
-            "SMILES_2", "Core_2", "R_group_2", "Name_2", "pIC50_2", "Frag_Type_2",
-            "Transform", "Delta", "Fragmentation_Types"
+            "SMILES_1", "Core_1", "R_group_1", "Name_1", "pIC50_1",
+            "SMILES_2", "Core_2", "R_group_2", "Name_2", "pIC50_2",
+            "Transform", "Delta"
         ]
         delta_df = pd.DataFrame(delta_list, columns=cols)
         
@@ -688,8 +403,10 @@ if RDKIT_AVAILABLE:
             with st.expander("Debug: Delta DataFrame", expanded=False):
                 st.write(f"Delta DataFrame shape: {delta_df.shape}")
                 st.dataframe(delta_df.head(10))
+                st.write("Column names:", delta_df.columns.tolist())
+                st.write("Unique transforms:", delta_df['Transform'].nunique())
         
-        # Step 3: Collect frequent transforms
+        # Step 3: Collect frequent transforms - MATCHING ORIGINAL
         status_text.text("Step 3/4: Analyzing transformations...")
         progress_bar.progress(75)
         
@@ -697,82 +414,50 @@ if RDKIT_AVAILABLE:
         for k, v in delta_df.groupby("Transform"):
             # Only include transforms with minimum occurrences
             if len(v) >= min_transform_occurrence:
-                # Get fragmentation types for this transform
-                frag_types = v['Fragmentation_Types'].unique()
-                mmp_list.append([k, len(v), v.Delta.values, frag_types])
+                mmp_list.append([k, len(v), v.Delta.values])
         
         if show_debug:
             with st.expander("Debug: Transform Collection", expanded=False):
                 st.write(f"Total unique transforms: {delta_df['Transform'].nunique()}")
                 st.write(f"Transforms with >= {min_transform_occurrence} occurrences: {len(mmp_list)}")
+                if mmp_list:
+                    st.write("First 5 transforms:")
+                    for i, transform in enumerate(mmp_list[:5]):
+                        st.write(f"Transform {i+1}: {transform[0]} - Count: {transform[1]}")
         
         if not mmp_list:
             st.warning(f"No transforms found with {min_transform_occurrence}+ occurrences")
             return delta_df, None
         
         # Create transforms DataFrame
-        mmp_df = pd.DataFrame(mmp_list, columns=["Transform", "Count", "Deltas", "Fragmentation_Types"])
+        mmp_df = pd.DataFrame(mmp_list, columns=["Transform", "Count", "Deltas"])
         mmp_df['idx'] = range(0, len(mmp_df))
         mmp_df['mean_delta'] = [x.mean() for x in mmp_df.Deltas]
-        mmp_df['std_delta'] = [x.std() for x in mmp_df.Deltas]
-        mmp_df['min_delta'] = [x.min() for x in mmp_df.Deltas]
-        mmp_df['max_delta'] = [x.max() for x in mmp_df.Deltas]
         
-        # Create reaction molecules with error handling
+        # Create reaction molecules with error handling - MATCH ORIGINAL
         rxn_mols = []
         for transform in mmp_df['Transform']:
             try:
-                # Try with labeled atoms
+                # IMPORTANT: Use the same SMARTS conversion as original
+                # Note: replace('*-','*') reverses the earlier replace('*','*-')
                 rxn = AllChem.ReactionFromSmarts(transform.replace('*-','*'), useSmiles=True)
                 rxn_mols.append(rxn)
             except Exception as e:
+                # If that fails, try alternative approach
                 try:
-                    # Try without labels
-                    clean_transform = transform.replace('[*:', '[').replace(']', ']')
-                    rxn = AllChem.ReactionFromSmarts(clean_transform.replace('*-','*'), useSmiles=True)
-                    rxn_mols.append(rxn)
+                    parts = transform.split('>>')
+                    if len(parts) == 2:
+                        left = parts[0].replace('*-','*')
+                        right = parts[1].replace('*-','*')
+                        rxn_smarts = f"{left}>>{right}"
+                        rxn = AllChem.ReactionFromSmarts(rxn_smarts, useSmiles=True)
+                        rxn_mols.append(rxn)
+                    else:
+                        rxn_mols.append(None)
                 except:
                     rxn_mols.append(None)
         
         mmp_df['rxn_mol'] = rxn_mols
-        
-        # Add fragmentation complexity score
-        def get_frag_complexity(frag_types_array):
-            """Calculate fragmentation complexity score"""
-            complexity = 0
-            for types in frag_types_array:
-                for t in types.split('|'):
-                    if 'MMPA_' in t:
-                        # Extract number of cuts from MMPA_2CUT format
-                        import re
-                        match = re.search(r'MMPA_(\d+)CUT', t)
-                        if match:
-                            complexity = max(complexity, int(match.group(1)))
-                    elif 'CUTS_' in t:
-                        # Count number of cuts in LEGACY_CUTS_1_2_3 format
-                        cut_count = len(t.split('_')) - 2  # Subtract "LEGACY" and "CUTS"
-                        complexity = max(complexity, cut_count)
-                    elif t not in ['NO_CUT', 'ERROR']:
-                        complexity = max(complexity, 1)
-            return complexity
-        
-        mmp_df['frag_complexity'] = [get_frag_complexity(x) for x in mmp_df['Fragmentation_Types']]
-        
-        # Add fragmentation method classification
-        def get_frag_method(frag_types_array):
-            """Determine fragmentation method used"""
-            methods = set()
-            for types in frag_types_array:
-                for t in types.split('|'):
-                    if 'MMPA' in t:
-                        methods.add('RDKit MMPA')
-                    elif 'LEGACY' in t or 'SMART' in t or 'CUT' in t:
-                        methods.add('Legacy')
-                    elif 'NO_CUT' in t:
-                        methods.add('No Cut')
-            return ', '.join(sorted(methods)) if methods else 'Unknown'
-        
-        mmp_df['frag_method'] = [get_frag_method(x) for x in mmp_df['Fragmentation_Types']]
         
         # Step 4: Complete
         status_text.text("Step 4/4: Analysis complete!")
@@ -785,17 +470,16 @@ if RDKIT_AVAILABLE:
     def plot_stripplot_to_fig(deltas):
         """Create a stripplot figure"""
         fig, ax = plt.subplots(figsize=(4, 1.5))
+        sns.stripplot(x=deltas, ax=ax, jitter=0.2, alpha=0.7, s=5, color='blue')
+        ax.axvline(0, ls='--', c='red')
+        
+        # Set appropriate x limits based on data
         if len(deltas) > 0:
-            sns.stripplot(x=deltas, ax=ax, jitter=0.2, alpha=0.7, s=5, color='blue')
-            ax.axvline(0, ls='--', c='red')
-            
-            # Set appropriate x limits
             data_min = min(deltas)
             data_max = max(deltas)
             padding = max(0.5, (data_max - data_min) * 0.1)
             ax.set_xlim(data_min - padding, data_max + padding)
         else:
-            ax.axvline(0, ls='--', c='red')
             ax.set_xlim(-5, 5)
             
         ax.set_xlabel('ΔpIC50')
@@ -823,18 +507,17 @@ if RDKIT_AVAILABLE:
         
         example_list = []
         for _, row in examples.sort_values("Delta", ascending=False).iterrows():
+            # Create two entries for each pair
             example_list.append({
                 "SMILES": row['SMILES_1'],
                 "Name": row['Name_1'],
                 "pIC50": row['pIC50_1'],
-                "Frag_Type": row['Frag_Type_1'],
                 "Type": "Before"
             })
             example_list.append({
                 "SMILES": row['SMILES_2'],
                 "Name": row['Name_2'],
                 "pIC50": row['pIC50_2'],
-                "Frag_Type": row['Frag_Type_2'],
                 "Type": "After"
             })
         
@@ -852,6 +535,46 @@ if RDKIT_AVAILABLE:
                         st.image(img, caption=f"{name} (pIC50: {pIC50:.2f})")
                 except:
                     st.write(f"{name}: {smiles}")
+
+    def original_approach_simulation(row_df, show_debug=False):
+        """Simulate the original approach for comparison"""
+        original_delta_list = []
+        
+        for k, v in row_df.groupby("Core"):
+            if len(v) > 2:
+                for a, b in combinations(range(0, len(v)), 2):
+                    reagent_a = v.iloc[a]
+                    reagent_b = v.iloc[b]
+                    
+                    if reagent_a.SMILES == reagent_b.SMILES:
+                        continue
+                    
+                    reagent_a, reagent_b = sorted([reagent_a, reagent_b], key=lambda x: x.SMILES)
+                    
+                    delta = reagent_b.pIC50 - reagent_a.pIC50
+                    
+                    # EXACTLY as in the original code snippet
+                    original_delta_list.append(
+                        list(reagent_a.values) + 
+                        list(reagent_b.values) +
+                        [f"{reagent_a.R_group.replace('*','*-')}>>{reagent_b.R_group.replace('*','*-')}", delta]
+                    )
+        
+        if original_delta_list:
+            cols = [
+                "SMILES_1", "Core_1", "R_group_1", "Name_1", "pIC50_1",
+                "SMILES_2", "Core_2", "R_group_2", "Name_2", "pIC50_2",
+                "Transform", "Delta"
+            ]
+            original_df = pd.DataFrame(original_delta_list, columns=cols)
+            
+            if show_debug:
+                with st.expander("Debug: Original Approach", expanded=False):
+                    st.write(f"Original approach pairs: {len(original_df)}")
+                    st.dataframe(original_df.head(10))
+            
+            return original_df
+        return None
 
 # Main app logic
 if not RDKIT_AVAILABLE:
@@ -883,6 +606,17 @@ if not RDKIT_AVAILABLE:
     ```
     """)
     
+    # Show requirements
+    with st.expander("Requirements"):
+        st.code("""
+        streamlit>=1.28.0
+        pandas>=2.0.0
+        numpy<2  # Important for RDKit compatibility
+        matplotlib>=3.7.0
+        seaborn>=0.12.0
+        rdkit-pypi>=2023.9.0
+        """, language="bash")
+    
 elif uploaded_file is not None:
     # Get parameters from sidebar
     sanitize = sanitize_molecules
@@ -903,47 +637,50 @@ elif uploaded_file is not None:
             
             st.dataframe(df[['SMILES', 'Name', 'pIC50']].head(10))
         
-        # Perform MMP analysis with configurable cuts
+        # Perform MMP analysis
         st.markdown('<h2 class="section-header">🔍 MMP Analysis Results</h2>', unsafe_allow_html=True)
         
-        # Show analysis parameters
-        st.markdown(f"""
-        <div class="info-box">
-            <h4>⚙️ Analysis Parameters</h4>
-            <p>• Fragmentation method: <strong>{fragmentation_method}</strong></p>
-            <p>• Maximum cuts per molecule: <strong>{max_cuts}</strong></p>
-            <p>• Strategy: <strong>{fragmentation_strategy if fragmentation_method == 'Legacy Method' else 'RDKit MMPA'}</strong></p>
-            <p>• Allow ring bond cutting: <strong>{'Yes' if include_rings else 'No'}</strong></p>
-            <p>• Minimum transform occurrences: <strong>{min_occurrence}</strong></p>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        delta_df, mmp_df = perform_mmp_analysis(
-            df, 
-            min_occurrence, 
-            max_cuts=max_cuts,
-            fragmentation_strategy=fragmentation_strategy,
-            fragmentation_method=fragmentation_method,
-            include_rings=include_rings,
-            show_debug=show_debug
-        )
+        delta_df, mmp_df = perform_mmp_analysis(df, min_occurrence, show_debug)
         
         if delta_df is not None:
             # Show statistics
             st.success("Analysis complete!")
-            col1, col2, col3, col4 = st.columns(4)
+            col1, col2, col3 = st.columns(3)
             col1.metric("Total Pairs Generated", len(delta_df))
+            
+            # Optional: Compare with original approach
+            if show_debug and 'row_df' in locals():
+                original_df = original_approach_simulation(row_df, show_debug)
+                if original_df is not None:
+                    comparison_col1, comparison_col2 = st.columns(2)
+                    with comparison_col1:
+                        st.info(f"Current approach pairs: {len(delta_df)}")
+                        st.dataframe(delta_df[['SMILES_1', 'SMILES_2', 'Transform', 'Delta']].head(5))
+                    
+                    with comparison_col2:
+                        st.info(f"Original approach pairs: {len(original_df)}")
+                        st.dataframe(original_df[['SMILES_1', 'SMILES_2', 'Transform', 'Delta']].head(5))
+                    
+                    # Check if identical
+                    delta_df_sorted = delta_df.sort_values(['SMILES_1', 'SMILES_2']).reset_index(drop=True)
+                    original_df_sorted = original_df.sort_values(['SMILES_1', 'SMILES_2']).reset_index(drop=True)
+                    
+                    if delta_df_sorted.equals(original_df_sorted):
+                        st.success("✅ Both approaches give identical results!")
+                    else:
+                        st.warning("⚠️ Approaches differ!")
+                        # Show differences
+                        diff_mask = ~delta_df_sorted['Transform'].eq(original_df_sorted['Transform'])
+                        if diff_mask.any():
+                            st.write("Different transforms:")
+                            st.dataframe(pd.DataFrame({
+                                'Current': delta_df_sorted.loc[diff_mask, 'Transform'].values,
+                                'Original': original_df_sorted.loc[diff_mask, 'Transform'].values
+                            }))
             
             if mmp_df is not None:
                 col2.metric("Unique Transforms", len(mmp_df))
                 col3.metric("Avg Transform Frequency", f"{mmp_df['Count'].mean():.1f}")
-                
-                # Calculate fragmentation method distribution
-                method_counts = mmp_df['frag_method'].value_counts()
-                method_summary = ", ".join([f"{k}: {v}" for k, v in method_counts.items()[:2]])
-                if len(method_counts) > 2:
-                    method_summary += f", ..."
-                col4.metric("Fragmentation Methods", method_summary)
                 
                 # Sort transforms by mean delta
                 mmp_df_sorted = mmp_df.sort_values("mean_delta", ascending=False)
@@ -965,19 +702,13 @@ elif uploaded_file is not None:
                                     st.info("Reaction image not available")
                             
                             with col2:
-                                # Show fragmentation method badge
-                                method_badge = f'<span style="background-color: #3B82F6; color: white; padding: 2px 8px; border-radius: 12px; font-size: 0.8rem; margin-right: 5px;">{row["frag_method"]}</span>'
-                                complexity_badge = ""
-                                if row['frag_complexity'] > 1:
-                                    complexity_badge = f'<span style="background-color: #F59E0B; color: white; padding: 2px 8px; border-radius: 12px; font-size: 0.8rem;">{row["frag_complexity"]} cuts</span>'
-                                
                                 st.markdown(f"""
                                 <div class="transform-card">
-                                    <h4>Transform #{i+1} {method_badge} {complexity_badge}</h4>
+                                    <h4>Transform #{i+1}</h4>
                                     <p><strong>Transformation:</strong> {row['Transform']}</p>
-                                    <p><strong>Mean ΔpIC50:</strong> <span style="color: {'#10B981' if row['mean_delta'] > 0 else '#EF4444'}">{row['mean_delta']:.2f}</span> ± {row['std_delta']:.2f}</p>
+                                    <p><strong>Mean ΔpIC50:</strong> {row['mean_delta']:.2f}</p>
                                     <p><strong>Occurrences:</strong> {row['Count']}</p>
-                                    <p><strong>ΔpIC50 Range:</strong> {row['min_delta']:.2f} to {row['max_delta']:.2f}</p>
+                                    <p><strong>ΔpIC50 Range:</strong> {min(row['Deltas']):.2f} to {max(row['Deltas']):.2f}</p>
                                 </div>
                                 """, unsafe_allow_html=True)
                             
@@ -990,7 +721,20 @@ elif uploaded_file is not None:
                                 examples_df = find_examples(delta_df, row['Transform'])
                                 if examples_df is not None and len(examples_df) > 0:
                                     with st.expander(f"View {len(examples_df)//2} compound pairs for this transform"):
+                                        # Display as table first
                                         st.dataframe(examples_df)
+                                        
+                                        # Try to display molecules if possible
+                                        try:
+                                            cols = st.columns(4)
+                                            for idx, (_, example_row) in enumerate(examples_df.iterrows()):
+                                                mol = Chem.MolFromSmiles(example_row['SMILES'])
+                                                if mol:
+                                                    with cols[idx % 4]:
+                                                        img = Draw.MolToImage(mol, size=(200, 200))
+                                                        st.image(img, caption=f"{example_row['Name']} (pIC50: {example_row['pIC50']:.2f})")
+                                        except:
+                                            pass
                 
                 # Show top negative transforms
                 if show_top_negative and len(mmp_df_sorted) > 0:
@@ -1009,19 +753,13 @@ elif uploaded_file is not None:
                                     st.info("Reaction image not available")
                             
                             with col2:
-                                # Show fragmentation method badge
-                                method_badge = f'<span style="background-color: #3B82F6; color: white; padding: 2px 8px; border-radius: 12px; font-size: 0.8rem; margin-right: 5px;">{row["frag_method"]}</span>'
-                                complexity_badge = ""
-                                if row['frag_complexity'] > 1:
-                                    complexity_badge = f'<span style="background-color: #F59E0B; color: white; padding: 2px 8px; border-radius: 12px; font-size: 0.8rem;">{row["frag_complexity"]} cuts</span>'
-                                
                                 st.markdown(f"""
                                 <div class="transform-card">
-                                    <h4>Transform #{i+1} (Negative) {method_badge} {complexity_badge}</h4>
+                                    <h4>Transform #{i+1} (Negative)</h4>
                                     <p><strong>Transformation:</strong> {row['Transform']}</p>
-                                    <p><strong>Mean ΔpIC50:</strong> <span style="color: {'#10B981' if row['mean_delta'] > 0 else '#EF4444'}">{row['mean_delta']:.2f}</span> ± {row['std_delta']:.2f}</p>
+                                    <p><strong>Mean ΔpIC50:</strong> {row['mean_delta']:.2f}</p>
                                     <p><strong>Occurrences:</strong> {row['Count']}</p>
-                                    <p><strong>ΔpIC50 Range:</strong> {row['min_delta']:.2f} to {row['max_delta']:.2f}</p>
+                                    <p><strong>ΔpIC50 Range:</strong> {min(row['Deltas']):.2f} to {max(row['Deltas']):.2f}</p>
                                 </div>
                                 """, unsafe_allow_html=True)
                             
@@ -1034,73 +772,38 @@ elif uploaded_file is not None:
                                 examples_df = find_examples(delta_df, row['Transform'])
                                 if examples_df is not None and len(examples_df) > 0:
                                     with st.expander(f"View {len(examples_df)//2} compound pairs for this transform"):
+                                        # Display as table first
                                         st.dataframe(examples_df)
+                                        
+                                        # Try to display molecules if possible
+                                        try:
+                                            cols = st.columns(4)
+                                            for idx, (_, example_row) in enumerate(examples_df.iterrows()):
+                                                mol = Chem.MolFromSmiles(example_row['SMILES'])
+                                                if mol:
+                                                    with cols[idx % 4]:
+                                                        img = Draw.MolToImage(mol, size=(200, 200))
+                                                        st.image(img, caption=f"{example_row['Name']} (pIC50: {example_row['pIC50']:.2f})")
+                                        except:
+                                            pass
                 
-                # Show all transforms table with filtering options
+                # Show all transforms table
                 if len(mmp_df_sorted) > 0:
                     st.markdown('<h3 class="section-header">📋 All Transformations</h3>', unsafe_allow_html=True)
                     
-                    # Add filtering options
-                    col1, col2, col3 = st.columns(3)
-                    
-                    with col1:
-                        filter_method = st.selectbox(
-                            "Filter by fragmentation method",
-                            options=["All", "RDKit MMPA", "Legacy", "Mixed"],
-                            index=0
-                        )
-                    
-                    with col2:
-                        filter_direction = st.selectbox(
-                            "Filter by effect direction",
-                            options=["All", "Positive only (Δ>0)", "Negative only (Δ<0)", "Neutral (Δ≈0)"],
-                            index=0
-                        )
-                    
-                    with col3:
-                        min_frequency = st.slider(
-                            "Minimum frequency",
-                            min_value=min_occurrence,
-                            max_value=int(mmp_df_sorted['Count'].max()),
-                            value=min_occurrence
-                        )
-                    
-                    # Apply filters
-                    filtered_df = mmp_df_sorted.copy()
-                    
-                    if filter_method == "RDKit MMPA":
-                        filtered_df = filtered_df[filtered_df['frag_method'].str.contains('RDKit MMPA')]
-                    elif filter_method == "Legacy":
-                        filtered_df = filtered_df[filtered_df['frag_method'].str.contains('Legacy')]
-                    elif filter_method == "Mixed":
-                        filtered_df = filtered_df[filtered_df['frag_method'].str.contains(',')]
-                    
-                    if filter_direction == "Positive only (Δ>0)":
-                        filtered_df = filtered_df[filtered_df['mean_delta'] > 0]
-                    elif filter_direction == "Negative only (Δ<0)":
-                        filtered_df = filtered_df[filtered_df['mean_delta'] < 0]
-                    elif filter_direction == "Neutral (Δ≈0)":
-                        filtered_df = filtered_df[abs(filtered_df['mean_delta']) < 0.5]
-                    
-                    filtered_df = filtered_df[filtered_df['Count'] >= min_frequency]
-                    
-                    st.info(f"Showing {len(filtered_df)} transforms after filtering")
-                    
                     if show_all_transforms:
-                        display_df = filtered_df
+                        display_df = mmp_df_sorted
                     else:
-                        display_df = filtered_df.head(transforms_to_display)
+                        display_df = mmp_df_sorted.head(transforms_to_display)
                     
-                    # Enhanced table display
-                    display_columns = ['Transform', 'Count', 'mean_delta', 'std_delta', 'frag_complexity', 'frag_method']
-                    st.dataframe(display_df[display_columns].rename(
-                        columns={
-                            'mean_delta': 'Mean ΔpIC50',
-                            'std_delta': 'Std ΔpIC50',
-                            'frag_complexity': 'Cuts',
-                            'frag_method': 'Method'
-                        }
+                    # Simple table display
+                    st.dataframe(display_df[['Transform', 'Count', 'mean_delta']].rename(
+                        columns={'mean_delta': 'Mean ΔpIC50'}
                     ).round(3))
+                    
+                    # Option to view full data
+                    with st.expander("View detailed transform data"):
+                        st.dataframe(display_df)
                 
                 # Export results
                 if save_results and mmp_df is not None:
@@ -1116,7 +819,6 @@ elif uploaded_file is not None:
                         output = io.BytesIO()
                         with pd.ExcelWriter(output, engine='openpyxl') as writer:
                             df.to_excel(writer, index=False, sheet_name='MMP_Results')
-                            delta_df.to_excel(writer, index=False, sheet_name='All_Pairs')
                         return output.getvalue()
                     
                     col1, col2 = st.columns(2)
@@ -1125,7 +827,7 @@ elif uploaded_file is not None:
                         st.download_button(
                             label="📥 Download MMP Results (CSV)",
                             data=convert_df_to_csv(mmp_df_sorted),
-                            file_name=f"mmp_results_{max_cuts}cuts.csv",
+                            file_name="mmp_results.csv",
                             mime="text/csv"
                         )
                     
@@ -1133,7 +835,7 @@ elif uploaded_file is not None:
                         st.download_button(
                             label="📥 Download MMP Results (Excel)",
                             data=convert_df_to_excel(mmp_df_sorted),
-                            file_name=f"mmp_results_{max_cuts}cuts.xlsx",
+                            file_name="mmp_results.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                         )
                     
@@ -1141,12 +843,12 @@ elif uploaded_file is not None:
                     st.download_button(
                         label="📥 Download All Molecular Pairs (CSV)",
                         data=convert_df_to_csv(delta_df),
-                        file_name=f"mmp_pairs_{max_cuts}cuts.csv",
+                        file_name="mmp_pairs.csv",
                         mime="text/csv"
                     )
             
             else:
-                st.info(f"No transformations found with {min_occurrence}+ occurrences. Try reducing the minimum occurrence threshold or increasing the number of cuts.")
+                st.info(f"No transformations found with {min_occurrence}+ occurrences. Try reducing the minimum occurrence threshold.")
     else:
         st.warning("No valid molecules found in the dataset. Please check your SMILES strings.")
 else:
@@ -1156,21 +858,11 @@ else:
     
     This tool performs **Matched Molecular Pair (MMP) analysis** to identify structural transformations that affect compound potency.
     
-    ### New Feature: Advanced Fragmentation Methods
-    
-    You can now choose between different fragmentation algorithms:
-    
-    - **RDKit MMPA (Recommended)**: Uses RDKit's optimized fragmentation algorithm (fastest and most reliable)
-    - **Legacy Method**: Original bond-breaking method with full control over cutting strategy
-    - **Auto-select**: Automatically chooses the best method based on your parameters
-    
     ### How to use:
     1. **Upload your data** using the sidebar on the left
-    2. **Choose fragmentation method** (RDKit MMPA is recommended for most cases)
-    3. **Configure fragmentation parameters** (number of cuts, strategy for Legacy method)
-    4. **Set analysis parameters** like minimum transform occurrences
-    5. **View results** including top positive/negative transformations
-    6. **Export findings** for further analysis
+    2. **Configure parameters** like minimum transform occurrences
+    3. **View results** including top positive/negative transformations
+    4. **Export findings** for further analysis
     
     ### Required CSV format:
     Your CSV file should contain at least these columns:
@@ -1189,21 +881,20 @@ else:
     
     ### Key Logic:
     - **Pairs are generated only when 3+ compounds share the same core**
-    - **Configurable fragmentation methods** for different analysis needs
-    - **Advanced filtering** by fragmentation method and effect direction
+    - This reduces noise and focuses on statistically significant transformations
+    - Consistent with standard MMP analysis methodologies
     
     ### Troubleshooting:
     If you encounter errors:
     1. **NumPy compatibility**: Install `numpy<2` with `pip install "numpy<2"`
     2. **Invalid SMILES**: Check your SMILES strings are valid
-    3. **Memory issues with many cuts**: Reduce max cuts or use RDKit MMPA method
-
+    3. **Kekulization errors**: Disable "Kekulize molecules" in sidebar
+    
     ### References:
     - Hussain, J. & Rea, C. (2010). Computationally efficient algorithm to identify matched molecular pairs (MMPs) in large data sets. *Journal of Chemical Information and Modeling*, 50(3), 339-348. https://doi.org/10.1021/ci900450m
     - Dossetter, A. G., Griffen, E. J., & Leach, A. G. (2013). Matched molecular pair analysis in drug discovery. *Drug Discovery Today*, 18(15-16), 724-731. https://doi.org/10.1016/j.drudis.2013.03.003
     - Wassermann, A. M., Dimova, D., Iyer, P., & Bajorath, J., Advances in computational medicinal chemistry: matched molecular pair analysis. Drug Development Research, 73 (2012): 518-527. https://doi.org/10.1002/ddr.21045
     - Tyrchan, Christian, and Emma Evertsson. "Matched molecular pair analysis in short: algorithms, applications and limitations," Computational and Structural Biotechnology Journal 15 (2017): 86-90 https://doi.org/10.1016/j.csbj.2016.12.003
-    
     
     ⬅️ **Upload a CSV file in the sidebar to get started!**
     """)
@@ -1212,7 +903,7 @@ else:
 st.markdown("---")
 st.markdown("""
 <div style="text-align: center; color: #6B7280; font-size: 0.9rem;">
-    <p>MMP Analysis Tool v2.0 | Advanced Fragmentation Edition | Built with Streamlit, RDKit, and Pandas</p>
+    <p>MMP Analysis Tool v1.0 | Built with Streamlit, RDKit, and Pandas</p>
     <p>For research use only. Always validate computational predictions with experimental data.</p>
 </div>
 """, unsafe_allow_html=True)
