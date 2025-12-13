@@ -60,6 +60,20 @@ st.markdown("""
         border-radius: 5px;
         margin: 1rem 0;
     }
+    .highlight-before {
+        background-color: #FFE4E4;
+        padding: 2px 4px;
+        border-radius: 3px;
+        font-weight: bold;
+        color: #DC2626;
+    }
+    .highlight-after {
+        background-color: #DCFCE7;
+        padding: 2px 4px;
+        border-radius: 3px;
+        font-weight: bold;
+        color: #16A34A;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -71,6 +85,7 @@ try:
     from rdkit import Chem
     from rdkit.Chem import AllChem, Draw
     from rdkit.Chem.Draw import rdMolDraw2D
+    from rdkit.Chem import rdDepictor
     RDKIT_AVAILABLE = True
 except ImportError as e:
     st.error(f"RDKit not available: {e}")
@@ -116,11 +131,19 @@ with st.sidebar:
         transforms_to_display = st.slider("Number of transforms to display", 1, 50, 10, 
                                          disabled=show_all_transforms)
         
+        # Highlighting options
+        st.markdown("### 🎨 Highlighting Options")
+        highlight_color_before = st.color_picker("Before transformation color", "#FF6B6B")
+        highlight_color_after = st.color_picker("After transformation color", "#4ECDC4")
+        highlight_intensity = st.slider("Highlight intensity", 0.1, 1.0, 0.7)
+        
         # Analysis options
         st.markdown("### 🔬 Analysis")
         show_top_positive = st.checkbox("Show top positive transforms", value=True)
         show_top_negative = st.checkbox("Show top negative transforms", value=True)
         show_compound_examples = st.checkbox("Show compound examples", value=True)
+        show_highlighted_molecules = st.checkbox("Show highlighted molecules", value=True,
+                                               help="Highlight the changing parts in compounds")
         
         # Pair generation logic
         st.markdown("### 🔗 Pair Generation Logic")
@@ -148,6 +171,8 @@ with st.sidebar:
         2. Find pairs with same core but different R-groups
         3. Calculate ΔpIC50 for each pair
         4. Identify frequently occurring transformations
+        
+        **NEW:** Exact transformation display with highlighted changing regions
         """)
 
 # Helper functions (only define if RDKit is available)
@@ -272,6 +297,133 @@ if RDKIT_AVAILABLE:
         
         return results
 
+    def get_common_core(smiles1, smiles2):
+        """Find common core between two molecules"""
+        try:
+            mol1 = Chem.MolFromSmiles(smiles1)
+            mol2 = Chem.MolFromSmiles(smiles2)
+            
+            if mol1 is None or mol2 is None:
+                return None
+            
+            # Find maximum common substructure
+            mcs = Chem.rdFMCS.FindMCS([mol1, mol2], timeout=30)
+            if mcs.numAtoms > 0:
+                core = Chem.MolFromSmarts(mcs.smartsString)
+                return core
+        except:
+            pass
+        return None
+
+    def highlight_differences(mol1, mol2, transform, color1=(1.0, 0.42, 0.42), color2=(0.31, 0.80, 0.76)):
+        """Highlight the changing parts in two molecules based on the transform"""
+        try:
+            # Parse the transform to get R-groups
+            parts = transform.split('>>')
+            if len(parts) != 2:
+                return None, None
+            
+            rgroup1_smiles = parts[0]
+            rgroup2_smiles = parts[1]
+            
+            # Convert R-groups to molecules
+            rgroup1 = Chem.MolFromSmiles(rgroup1_smiles)
+            rgroup2 = Chem.MolFromSmiles(rgroup2_smiles)
+            
+            if rgroup1 is None or rgroup2 is None:
+                return None, None
+            
+            # Find attachment points in R-groups
+            attachment_atom1 = None
+            attachment_atom2 = None
+            
+            for atom in rgroup1.GetAtoms():
+                if atom.GetSymbol() == '*':
+                    attachment_atom1 = atom.GetIdx()
+                    break
+            
+            for atom in rgroup2.GetAtoms():
+                if atom.GetSymbol() == '*':
+                    attachment_atom2 = atom.GetIdx()
+                    break
+            
+            if attachment_atom1 is None or attachment_atom2 is None:
+                return None, None
+            
+            # Get atoms connected to attachment point in R-groups (these are the changing atoms)
+            changing_atoms1 = set()
+            changing_atoms2 = set()
+            
+            # For R-group 1, get non-attachment atoms
+            for atom in rgroup1.GetAtoms():
+                if atom.GetIdx() != attachment_atom1:
+                    changing_atoms1.add(atom.GetIdx())
+            
+            # For R-group 2, get non-attachment atoms
+            for atom in rgroup2.GetAtoms():
+                if atom.GetIdx() != attachment_atom2:
+                    changing_atoms2.add(atom.GetIdx())
+            
+            # Create atom maps for original molecules to find matching atoms
+            mol1_copy = Chem.Mol(mol1)
+            mol2_copy = Chem.Mol(mol2)
+            
+            # Try to find the common core
+            core = get_common_core(Chem.MolToSmiles(mol1_copy), Chem.MolToSmiles(mol2_copy))
+            
+            if core is not None:
+                # Find matches of core in each molecule
+                matches1 = mol1_copy.GetSubstructMatches(core)
+                matches2 = mol2_copy.GetSubstructMatches(core)
+                
+                if matches1 and matches2:
+                    # Assuming first match is correct
+                    core_atoms1 = set(matches1[0])
+                    core_atoms2 = set(matches2[0])
+                    
+                    # The changing atoms are the ones NOT in the core
+                    highlight_atoms1 = [i for i in range(mol1_copy.GetNumAtoms()) if i not in core_atoms1]
+                    highlight_atoms2 = [i for i in range(mol2_copy.GetNumAtoms()) if i not in core_atoms2]
+                    
+                    # Create highlighted images
+                    drawer1 = rdMolDraw2D.MolDraw2DCairo(300, 300)
+                    drawer2 = rdMolDraw2D.MolDraw2DCairo(300, 300)
+                    
+                    # Set drawing options
+                    opts1 = drawer1.drawOptions()
+                    opts2 = drawer2.drawOptions()
+                    
+                    # Highlight atoms
+                    colors1 = {}
+                    colors2 = {}
+                    
+                    for atom_idx in highlight_atoms1:
+                        colors1[atom_idx] = color1
+                    
+                    for atom_idx in highlight_atoms2:
+                        colors2[atom_idx] = color2
+                    
+                    # Draw molecules
+                    rdDepictor.Compute2DCoords(mol1_copy)
+                    rdDepictor.Compute2DCoords(mol2_copy)
+                    
+                    drawer1.DrawMolecule(mol1_copy, highlightAtoms=highlight_atoms1, highlightAtomColors=colors1)
+                    drawer2.DrawMolecule(mol2_copy, highlightAtoms=highlight_atoms2, highlightAtomColors=colors2)
+                    
+                    drawer1.FinishDrawing()
+                    drawer2.FinishDrawing()
+                    
+                    # Convert to base64
+                    img1 = drawer1.GetDrawingText()
+                    img2 = drawer2.GetDrawingText()
+                    
+                    return base64.b64encode(img1).decode(), base64.b64encode(img2).decode()
+            
+        except Exception as e:
+            st.error(f"Error highlighting differences: {e}")
+        
+        return None, None
+
     def perform_mmp_analysis(df, min_transform_occurrence, show_debug=False):
         """Perform MMP analysis matching the original logic EXACTLY"""
         if df is None or len(df) == 0:
@@ -365,12 +517,11 @@ if RDKIT_AVAILABLE:
                     # Calculate delta
                     delta = reagent_b.pIC50 - reagent_a.pIC50
                     
-                    # Create transform string - MATCH ORIGINAL FORMAT EXACTLY
-                    # Note: The replace('*','*-') is critical
-                    transform_str = f"{reagent_a.R_group.replace('*','*-')}>>{reagent_b.R_group.replace('*','*-')}"
+                    # FIXED: Create transform string - Use R-group SMILES directly
+                    # This shows exact transformation like [CH3]*>>[NH2]* instead of [CH4]*->>[NH3]*
+                    transform_str = f"{reagent_a.R_group}>>{reagent_b.R_group}"
                     
                     # CRITICAL: Create the list in EXACT same order as original
-                    # Original code: list(reagent_a.values) + list(reagent_b.values) + [transform_str, delta]
                     delta_list.append([
                         reagent_a.SMILES, reagent_a.Core, reagent_a.R_group, reagent_a.Name, reagent_a.pIC50,
                         reagent_b.SMILES, reagent_b.Core, reagent_b.R_group, reagent_b.Name, reagent_b.pIC50,
@@ -385,7 +536,7 @@ if RDKIT_AVAILABLE:
                 if delta_list:
                     st.write("First 3 pairs:")
                     for i, pair in enumerate(delta_list[:3]):
-                        st.write(f"Pair {i+1}: {pair[:5]} ... {pair[5:10]} ... Δ={pair[-1]:.3f}")
+                        st.write(f"Pair {i+1}: Transform: {pair[10]}, Δ={pair[-1]:.3f}")
         
         if not delta_list:
             st.error("No molecular pairs found")
@@ -434,24 +585,34 @@ if RDKIT_AVAILABLE:
         mmp_df['idx'] = range(0, len(mmp_df))
         mmp_df['mean_delta'] = [x.mean() for x in mmp_df.Deltas]
         
-        # Create reaction molecules with error handling - MATCH ORIGINAL
+        # Create reaction molecules with error handling - FIXED VERSION
         rxn_mols = []
         for transform in mmp_df['Transform']:
             try:
-                # IMPORTANT: Use the same SMARTS conversion as original
-                # Note: replace('*-','*') reverses the earlier replace('*','*-')
-                rxn = AllChem.ReactionFromSmarts(transform.replace('*-','*'), useSmiles=True)
+                # FIXED: Create reaction directly from R-group SMILES
+                # No need to replace * with *- anymore
+                rxn = AllChem.ReactionFromSmarts(transform, useSmiles=True)
                 rxn_mols.append(rxn)
             except Exception as e:
-                # If that fails, try alternative approach
+                # If that fails, try to create the molecules separately
                 try:
                     parts = transform.split('>>')
                     if len(parts) == 2:
-                        left = parts[0].replace('*-','*')
-                        right = parts[1].replace('*-','*')
-                        rxn_smarts = f"{left}>>{right}"
-                        rxn = AllChem.ReactionFromSmarts(rxn_smarts, useSmiles=True)
-                        rxn_mols.append(rxn)
+                        # Ensure attachment points are properly marked
+                        left_smiles = parts[0]
+                        right_smiles = parts[1]
+                        
+                        # Create molecules
+                        left_mol = Chem.MolFromSmiles(left_smiles)
+                        right_mol = Chem.MolFromSmiles(right_smiles)
+                        
+                        if left_mol and right_mol:
+                            # Create a reaction
+                            rxn_smarts = f"{Chem.MolToSmarts(left_mol)}>>{Chem.MolToSmarts(right_mol)}"
+                            rxn = AllChem.ReactionFromSmarts(rxn_smarts)
+                            rxn_mols.append(rxn)
+                        else:
+                            rxn_mols.append(None)
                     else:
                         rxn_mols.append(None)
                 except:
@@ -488,16 +649,70 @@ if RDKIT_AVAILABLE:
         return fig
 
     def get_rxn_image(rxn_mol):
-        """Convert reaction to base64 image"""
+        """Convert reaction to base64 image - FIXED for exact display"""
         if rxn_mol is None:
             return None
         try:
-            img = Draw.ReactionToImage(rxn_mol, subImgSize=(300, 150))
+            # Use explicit display options
+            drawer_options = Draw.MolDrawOptions()
+            drawer_options.addStereoAnnotation = True
+            drawer_options.addAtomIndices = False
+            drawer_options.explicitMethyl = True  # Show methyl groups explicitly
+            
+            # Draw reaction without adding implicit hydrogens
+            img = Draw.ReactionToImage(rxn_mol, subImgSize=(350, 200), drawOptions=drawer_options)
             buffered = io.BytesIO()
             img.save(buffered, format="PNG")
             return base64.b64encode(buffered.getvalue()).decode()
+        except Exception as e:
+            # Fallback to simple drawing
+            try:
+                img = Draw.ReactionToImage(rxn_mol, subImgSize=(350, 200))
+                buffered = io.BytesIO()
+                img.save(buffered, format="PNG")
+                return base64.b64encode(buffered.getvalue()).decode()
+            except:
+                return None
+
+    def get_exact_transformation_description(transform):
+        """Get a human-readable description of the exact transformation"""
+        try:
+            parts = transform.split('>>')
+            if len(parts) == 2:
+                left = parts[0].replace('*', '')
+                right = parts[1].replace('*', '')
+                
+                # Clean up brackets for display
+                left = left.replace('[', '').replace(']', '')
+                right = right.replace('[', '').replace(']', '')
+                
+                # Handle common groups
+                if left == "CH3":
+                    left_desc = "methyl"
+                elif left == "NH2":
+                    left_desc = "amino"
+                elif left == "OH":
+                    left_desc = "hydroxyl"
+                elif left == "F" or left == "Cl" or left == "Br" or left == "I":
+                    left_desc = left.lower() + "uoro" if left == "F" else left.lower() + "oro" if left == "Cl" else left.lower() + "romo" if left == "Br" else left.lower() + "odo"
+                else:
+                    left_desc = left
+                
+                if right == "CH3":
+                    right_desc = "methyl"
+                elif right == "NH2":
+                    right_desc = "amino"
+                elif right == "OH":
+                    right_desc = "hydroxyl"
+                elif right == "F" or right == "Cl" or right == "Br" or right == "I":
+                    right_desc = right.lower() + "uoro" if right == "F" else right.lower() + "oro" if right == "Cl" else right.lower() + "romo" if right == "Br" else right.lower() + "odo"
+                else:
+                    right_desc = right
+                
+                return f"{left_desc} → {right_desc}"
         except:
-            return None
+            pass
+        return transform
 
     def find_examples(delta_df, transform):
         """Find examples for a specific transform"""
@@ -512,69 +727,83 @@ if RDKIT_AVAILABLE:
                 "SMILES": row['SMILES_1'],
                 "Name": row['Name_1'],
                 "pIC50": row['pIC50_1'],
-                "Type": "Before"
+                "Type": "Before",
+                "Transform": transform
             })
             example_list.append({
                 "SMILES": row['SMILES_2'],
                 "Name": row['Name_2'],
                 "pIC50": row['pIC50_2'],
-                "Type": "After"
+                "Type": "After",
+                "Transform": transform
             })
         
         return pd.DataFrame(example_list)
 
-    def display_molecule_grid(smiles_list, names_list, pIC50_list):
-        """Display molecules in a grid"""
-        cols = st.columns(4)
-        for idx, (smiles, name, pIC50) in enumerate(zip(smiles_list, names_list, pIC50_list)):
-            with cols[idx % 4]:
-                try:
-                    mol = Chem.MolFromSmiles(smiles)
-                    if mol:
-                        img = Draw.MolToImage(mol, size=(200, 200))
-                        st.image(img, caption=f"{name} (pIC50: {pIC50:.2f})")
-                except:
-                    st.write(f"{name}: {smiles}")
-
-    def original_approach_simulation(row_df, show_debug=False):
-        """Simulate the original approach for comparison"""
-        original_delta_list = []
+    def display_molecule_grid_with_highlight(df, highlight_color_before, highlight_color_after):
+        """Display molecules with highlighted changing regions"""
+        if len(df) == 0:
+            return
         
-        for k, v in row_df.groupby("Core"):
-            if len(v) > 2:
-                for a, b in combinations(range(0, len(v)), 2):
-                    reagent_a = v.iloc[a]
-                    reagent_b = v.iloc[b]
-                    
-                    if reagent_a.SMILES == reagent_b.SMILES:
-                        continue
-                    
-                    reagent_a, reagent_b = sorted([reagent_a, reagent_b], key=lambda x: x.SMILES)
-                    
-                    delta = reagent_b.pIC50 - reagent_a.pIC50
-                    
-                    # EXACTLY as in the original code snippet
-                    original_delta_list.append(
-                        list(reagent_a.values) + 
-                        list(reagent_b.values) +
-                        [f"{reagent_a.R_group.replace('*','*-')}>>{reagent_b.R_group.replace('*','*-')}", delta]
+        # Convert color hex to RGB tuple for RDKit
+        def hex_to_rgb(hex_color):
+            hex_color = hex_color.lstrip('#')
+            return tuple(int(hex_color[i:i+2], 16)/255 for i in (0, 2, 4))
+        
+        color_before = hex_to_rgb(highlight_color_before)
+        color_after = hex_to_rgb(highlight_color_after)
+        
+        # Group by pair
+        pairs = []
+        for i in range(0, len(df), 2):
+            if i + 1 < len(df):
+                pairs.append((df.iloc[i], df.iloc[i+1]))
+        
+        # Display in grid
+        cols = st.columns(2)
+        for idx, (before_row, after_row) in enumerate(pairs):
+            col_idx = idx % 2
+            with cols[col_idx]:
+                st.markdown(f"**Pair {idx+1}**")
+                
+                # Create molecules
+                mol_before = Chem.MolFromSmiles(before_row['SMILES'])
+                mol_after = Chem.MolFromSmiles(after_row['SMILES'])
+                
+                if mol_before and mol_after:
+                    # Highlight differences
+                    img1_b64, img2_b64 = highlight_differences(
+                        mol_before, mol_after, before_row['Transform'],
+                        color1=color_before, color2=color_after
                     )
-        
-        if original_delta_list:
-            cols = [
-                "SMILES_1", "Core_1", "R_group_1", "Name_1", "pIC50_1",
-                "SMILES_2", "Core_2", "R_group_2", "Name_2", "pIC50_2",
-                "Transform", "Delta"
-            ]
-            original_df = pd.DataFrame(original_delta_list, columns=cols)
-            
-            if show_debug:
-                with st.expander("Debug: Original Approach", expanded=False):
-                    st.write(f"Original approach pairs: {len(original_df)}")
-                    st.dataframe(original_df.head(10))
-            
-            return original_df
-        return None
+                    
+                    if img1_b64 and img2_b64:
+                        # Display side by side
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.markdown(f'<div class="highlight-before">Before</div>', unsafe_allow_html=True)
+                            st.markdown(f'<img src="data:image/png;base64,{img1_b64}" width="200">', unsafe_allow_html=True)
+                            st.caption(f"{before_row['Name']} (pIC50: {before_row['pIC50']:.2f})")
+                        
+                        with col2:
+                            st.markdown(f'<div class="highlight-after">After</div>', unsafe_allow_html=True)
+                            st.markdown(f'<img src="data:image/png;base64,{img2_b64}" width="200">', unsafe_allow_html=True)
+                            st.caption(f"{after_row['Name']} (pIC50: {after_row['pIC50']:.2f})")
+                    else:
+                        # Fallback to simple display
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.markdown(f'<div class="highlight-before">Before</div>', unsafe_allow_html=True)
+                            img = Draw.MolToImage(mol_before, size=(200, 200))
+                            st.image(img, caption=f"{before_row['Name']} (pIC50: {before_row['pIC50']:.2f})")
+                        
+                        with col2:
+                            st.markdown(f'<div class="highlight-after">After</div>', unsafe_allow_html=True)
+                            img = Draw.MolToImage(mol_after, size=(200, 200))
+                            st.image(img, caption=f"{after_row['Name']} (pIC50: {after_row['pIC50']:.2f})")
+                else:
+                    st.write(f"Before: {before_row['Name']} (pIC50: {before_row['pIC50']:.2f})")
+                    st.write(f"After: {after_row['Name']} (pIC50: {after_row['pIC50']:.2f})")
 
 # Main app logic
 if not RDKIT_AVAILABLE:
@@ -622,6 +851,7 @@ elif uploaded_file is not None:
     sanitize = sanitize_molecules
     kekulize = kekulize_molecules
     show_debug = show_debug_info if 'show_debug_info' in locals() else False
+    show_highlighted = show_highlighted_molecules if 'show_highlighted_molecules' in locals() else True
     
     # Load data
     df = load_data(uploaded_file, sanitize=sanitize, kekulize=kekulize)
@@ -648,36 +878,6 @@ elif uploaded_file is not None:
             col1, col2, col3 = st.columns(3)
             col1.metric("Total Pairs Generated", len(delta_df))
             
-            # Optional: Compare with original approach
-            if show_debug and 'row_df' in locals():
-                original_df = original_approach_simulation(row_df, show_debug)
-                if original_df is not None:
-                    comparison_col1, comparison_col2 = st.columns(2)
-                    with comparison_col1:
-                        st.info(f"Current approach pairs: {len(delta_df)}")
-                        st.dataframe(delta_df[['SMILES_1', 'SMILES_2', 'Transform', 'Delta']].head(5))
-                    
-                    with comparison_col2:
-                        st.info(f"Original approach pairs: {len(original_df)}")
-                        st.dataframe(original_df[['SMILES_1', 'SMILES_2', 'Transform', 'Delta']].head(5))
-                    
-                    # Check if identical
-                    delta_df_sorted = delta_df.sort_values(['SMILES_1', 'SMILES_2']).reset_index(drop=True)
-                    original_df_sorted = original_df.sort_values(['SMILES_1', 'SMILES_2']).reset_index(drop=True)
-                    
-                    if delta_df_sorted.equals(original_df_sorted):
-                        st.success("✅ Both approaches give identical results!")
-                    else:
-                        st.warning("⚠️ Approaches differ!")
-                        # Show differences
-                        diff_mask = ~delta_df_sorted['Transform'].eq(original_df_sorted['Transform'])
-                        if diff_mask.any():
-                            st.write("Different transforms:")
-                            st.dataframe(pd.DataFrame({
-                                'Current': delta_df_sorted.loc[diff_mask, 'Transform'].values,
-                                'Original': original_df_sorted.loc[diff_mask, 'Transform'].values
-                            }))
-            
             if mmp_df is not None:
                 col2.metric("Unique Transforms", len(mmp_df))
                 col3.metric("Avg Transform Frequency", f"{mmp_df['Count'].mean():.1f}")
@@ -697,15 +897,18 @@ elif uploaded_file is not None:
                             with col1:
                                 img_base64 = get_rxn_image(row['rxn_mol'])
                                 if img_base64:
-                                    st.markdown(f'<img src="data:image/png;base64,{img_base64}" width="300">', unsafe_allow_html=True)
+                                    st.markdown(f'<img src="data:image/png;base64,{img_base64}" width="350">', unsafe_allow_html=True)
                                 else:
                                     st.info("Reaction image not available")
                             
                             with col2:
+                                # Get human-readable description
+                                description = get_exact_transformation_description(row['Transform'])
+                                
                                 st.markdown(f"""
                                 <div class="transform-card">
-                                    <h4>Transform #{i+1}</h4>
-                                    <p><strong>Transformation:</strong> {row['Transform']}</p>
+                                    <h4>Transform #{i+1}: {description}</h4>
+                                    <p><strong>Exact Transformation:</strong> {row['Transform']}</p>
                                     <p><strong>Mean ΔpIC50:</strong> {row['mean_delta']:.2f}</p>
                                     <p><strong>Occurrences:</strong> {row['Count']}</p>
                                     <p><strong>ΔpIC50 Range:</strong> {min(row['Deltas']):.2f} to {max(row['Deltas']):.2f}</p>
@@ -722,19 +925,17 @@ elif uploaded_file is not None:
                                 if examples_df is not None and len(examples_df) > 0:
                                     with st.expander(f"View {len(examples_df)//2} compound pairs for this transform"):
                                         # Display as table first
-                                        st.dataframe(examples_df)
+                                        st.dataframe(examples_df[['Name', 'pIC50', 'Type']])
                                         
-                                        # Try to display molecules if possible
-                                        try:
-                                            cols = st.columns(4)
-                                            for idx, (_, example_row) in enumerate(examples_df.iterrows()):
-                                                mol = Chem.MolFromSmiles(example_row['SMILES'])
-                                                if mol:
-                                                    with cols[idx % 4]:
-                                                        img = Draw.MolToImage(mol, size=(200, 200))
-                                                        st.image(img, caption=f"{example_row['Name']} (pIC50: {example_row['pIC50']:.2f})")
-                                        except:
-                                            pass
+                                        # Display molecules with highlighting
+                                        if show_highlighted:
+                                            st.markdown("### 🎨 Highlighted Molecules")
+                                            st.info(f"Red: Removed atoms/group | Green: Added atoms/group")
+                                            display_molecule_grid_with_highlight(
+                                                examples_df, 
+                                                highlight_color_before, 
+                                                highlight_color_after
+                                            )
                 
                 # Show top negative transforms
                 if show_top_negative and len(mmp_df_sorted) > 0:
@@ -748,15 +949,18 @@ elif uploaded_file is not None:
                             with col1:
                                 img_base64 = get_rxn_image(row['rxn_mol'])
                                 if img_base64:
-                                    st.markdown(f'<img src="data:image/png;base64,{img_base64}" width="300">', unsafe_allow_html=True)
+                                    st.markdown(f'<img src="data:image/png;base64,{img_base64}" width="350">', unsafe_allow_html=True)
                                 else:
                                     st.info("Reaction image not available")
                             
                             with col2:
+                                # Get human-readable description
+                                description = get_exact_transformation_description(row['Transform'])
+                                
                                 st.markdown(f"""
                                 <div class="transform-card">
-                                    <h4>Transform #{i+1} (Negative)</h4>
-                                    <p><strong>Transformation:</strong> {row['Transform']}</p>
+                                    <h4>Transform #{i+1} (Negative): {description}</h4>
+                                    <p><strong>Exact Transformation:</strong> {row['Transform']}</p>
                                     <p><strong>Mean ΔpIC50:</strong> {row['mean_delta']:.2f}</p>
                                     <p><strong>Occurrences:</strong> {row['Count']}</p>
                                     <p><strong>ΔpIC50 Range:</strong> {min(row['Deltas']):.2f} to {max(row['Deltas']):.2f}</p>
@@ -773,19 +977,17 @@ elif uploaded_file is not None:
                                 if examples_df is not None and len(examples_df) > 0:
                                     with st.expander(f"View {len(examples_df)//2} compound pairs for this transform"):
                                         # Display as table first
-                                        st.dataframe(examples_df)
+                                        st.dataframe(examples_df[['Name', 'pIC50', 'Type']])
                                         
-                                        # Try to display molecules if possible
-                                        try:
-                                            cols = st.columns(4)
-                                            for idx, (_, example_row) in enumerate(examples_df.iterrows()):
-                                                mol = Chem.MolFromSmiles(example_row['SMILES'])
-                                                if mol:
-                                                    with cols[idx % 4]:
-                                                        img = Draw.MolToImage(mol, size=(200, 200))
-                                                        st.image(img, caption=f"{example_row['Name']} (pIC50: {example_row['pIC50']:.2f})")
-                                        except:
-                                            pass
+                                        # Display molecules with highlighting
+                                        if show_highlighted:
+                                            st.markdown("### 🎨 Highlighted Molecules")
+                                            st.info(f"Red: Removed atoms/group | Green: Added atoms/group")
+                                            display_molecule_grid_with_highlight(
+                                                examples_df, 
+                                                highlight_color_before, 
+                                                highlight_color_after
+                                            )
                 
                 # Show all transforms table
                 if len(mmp_df_sorted) > 0:
@@ -796,14 +998,23 @@ elif uploaded_file is not None:
                     else:
                         display_df = mmp_df_sorted.head(transforms_to_display)
                     
-                    # Simple table display
-                    st.dataframe(display_df[['Transform', 'Count', 'mean_delta']].rename(
-                        columns={'mean_delta': 'Mean ΔpIC50'}
-                    ).round(3))
+                    # Create display table with descriptions
+                    display_data = []
+                    for _, row in display_df.iterrows():
+                        description = get_exact_transformation_description(row['Transform'])
+                        display_data.append({
+                            'Description': description,
+                            'Exact Transform': row['Transform'],
+                            'Count': row['Count'],
+                            'Mean ΔpIC50': round(row['mean_delta'], 3)
+                        })
+                    
+                    display_df_formatted = pd.DataFrame(display_data)
+                    st.dataframe(display_df_formatted)
                     
                     # Option to view full data
                     with st.expander("View detailed transform data"):
-                        st.dataframe(display_df)
+                        st.dataframe(mmp_df_sorted[['Transform', 'Count', 'mean_delta', 'Deltas']])
                 
                 # Export results
                 if save_results and mmp_df is not None:
@@ -858,10 +1069,15 @@ else:
     
     This tool performs **Matched Molecular Pair (MMP) analysis** to identify structural transformations that affect compound potency.
     
+    ### 🆕 New Features:
+    - **Exact transformation display**: Shows [CH3]*>>[NH2]* instead of [CH4]*->>[NH3]*
+    - **Highlighted compounds**: Changing regions are highlighted in molecules
+    - **Human-readable descriptions**: Get clear descriptions of transformations
+    
     ### How to use:
     1. **Upload your data** using the sidebar on the left
     2. **Configure parameters** like minimum transform occurrences
-    3. **View results** including top positive/negative transformations
+    3. **View results** including top positive/negative transformations with highlighted molecules
     4. **Export findings** for further analysis
     
     ### Required CSV format:
@@ -882,7 +1098,7 @@ else:
     ### Key Logic:
     - **Pairs are generated only when 3+ compounds share the same core**
     - This reduces noise and focuses on statistically significant transformations
-    - Consistent with standard MMP analysis methodologies
+    - **Exact fragment display**: Shows R-groups without added hydrogens
     
     ### Troubleshooting:
     If you encounter errors:
@@ -904,9 +1120,8 @@ else:
 st.markdown("---")
 st.markdown("""
 <div style="text-align: center; color: #6B7280; font-size: 0.9rem;">
-    <p>MMP Analysis Tool v1.0 | Built with Streamlit, RDKit, and Pandas</p>
+    <p>MMP Analysis Tool v1.1 | Built with Streamlit, RDKit, and Pandas</p>
+    <p><strong>New:</strong> Exact transformation display with molecule highlighting</p>
     <p>For research use only. Always validate computational predictions with experimental data.</p>
 </div>
 """, unsafe_allow_html=True)
-
-
