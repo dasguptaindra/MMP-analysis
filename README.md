@@ -10,13 +10,13 @@ Explore matched molecular pair (MMP) analysis interactively using the Streamlit-
 
 ⚠️ **Limitations**
 
-**Single-cut fragmentation only**
+**1. Single-cut fragmentation only**
 
-**No stereochemistry handling**
+**2. No stereochemistry handling**
 
-**Activity assumed comparable across assays**
+**3. Activity assumed comparable across assays**
 
-**Not suitable for covalent or metal-binding ligands (without modification)**
+**4. Not suitable for covalent or metal-binding ligands (without modification)**
 
 📚 **References**
 
