@@ -9,11 +9,10 @@ from rdkit.Chem import AllChem
 from rdkit.Chem.rdMMPA import FragmentMol
 from rdkit.Chem.rdRGroupDecomposition import RGroupDecompose
 import useful_rdkit_utils as uru
-import matplotlib.pyplot as plt
 
-# ================================
+# =========================================================
 # Streamlit config
-# ================================
+# =========================================================
 st.set_page_config(
     page_title="MMP Analyzer (Scaffold-Finder Equivalent)",
     page_icon="🧪",
@@ -23,23 +22,17 @@ st.set_page_config(
 st.title("🧪 Matched Molecular Pair (MMP) Analyzer")
 st.markdown(
     """
-This app performs **Matched Molecular Pair analysis using the exact same
-algorithm as `scaffold_finder.py`**  
-(RDKit `rdMMPA`, 2/3 atom filter, RGroupDecompose).
+This tool performs **Matched Molecular Pair (MMP) analysis**
+using the **exact same algorithm as `scaffold_finder.py`**.
 
-✔ Results are **reproducible**  
-✔ Scientifically **equivalent to the reference implementation**
+A progress bar is shown so you always know what the app is doing.
 """
 )
 
-# ================================
-# Helper functions (IDENTICAL LOGIC)
-# ================================
+# =========================================================
+# Helper functions (IDENTICAL to scaffold_finder.py)
+# =========================================================
 def cleanup_fragment(mol):
-    """
-    EXACT copy of scaffold_finder.py
-    Replace dummy atoms with hydrogens and remove atom maps
-    """
     rgroup_count = 0
     for atm in mol.GetAtoms():
         atm.SetAtomMapNum(0)
@@ -51,12 +44,8 @@ def cleanup_fragment(mol):
 
 
 def generate_fragments(mol):
-    """
-    EXACT fragment generation logic from scaffold_finder.py
-    """
     frag_list = FragmentMol(mol)
     flat_frags = [x for x in itertools.chain(*frag_list) if x]
-
     flat_frags = [uru.get_largest_fragment(x) for x in flat_frags]
 
     num_atoms = mol.GetNumAtoms()
@@ -74,25 +63,30 @@ def generate_fragments(mol):
 
     frag_smiles.append([Chem.MolToSmiles(mol), mol.GetNumAtoms(), 1])
 
-    frag_df = pd.DataFrame(
+    df = pd.DataFrame(
         frag_smiles,
         columns=["Core", "NumAtoms", "NumRgroups"]
     ).drop_duplicates("Core")
 
-    return frag_df
+    return df
 
 
-# ================================
-# MMP processing (IDENTICAL PAIRING)
-# ================================
-def run_mmp(processed_df, min_transform_occurrence):
+# =========================================================
+# MMP ANALYSIS WITH PROGRESS TRACKER
+# =========================================================
+def run_mmp_with_progress(processed_df, min_occ):
+
+    total_steps = len(processed_df)
+    progress_bar = st.progress(0)
+    status = st.empty()
 
     row_list = []
 
-    for smiles, name, activity, mol in processed_df[
-        ["SMILES", "Name", "Activity", "mol"]
-    ].values:
-
+    # -------- STEP 1: Fragment molecules --------
+    status.text("🔬 Fragmenting molecules and assigning R-groups...")
+    for i, (smiles, name, activity, mol) in enumerate(
+        processed_df[["SMILES", "Name", "Activity", "mol"]].values
+    ):
         frag_df = generate_fragments(mol)
 
         for core in frag_df.Core:
@@ -100,10 +94,7 @@ def run_mmp(processed_df, min_transform_occurrence):
             if core_mol is None:
                 continue
 
-            rgroup_match, _ = RGroupDecompose(
-                core_mol, [mol], asSmiles=True
-            )
-
+            rgroup_match, _ = RGroupDecompose(core_mol, [mol], asSmiles=True)
             if not rgroup_match:
                 continue
 
@@ -112,12 +103,10 @@ def run_mmp(processed_df, min_transform_occurrence):
                 continue
 
             row_list.append([
-                smiles,
-                core,
-                rgroups[0],
-                name,
-                activity
+                smiles, core, rgroups[0], name, activity
             ])
+
+        progress_bar.progress((i + 1) / total_steps)
 
     if not row_list:
         return None
@@ -127,9 +116,12 @@ def run_mmp(processed_df, min_transform_occurrence):
         columns=["SMILES", "Core", "R_group", "Name", "Activity"]
     )
 
-    # --- Pairwise comparison (IDENTICAL) ---
+    # -------- STEP 2: Pairwise comparison --------
+    status.text("🧮 Generating matched molecular pairs...")
     delta_list = []
-    for _, v in row_df.groupby("Core"):
+    groups = list(row_df.groupby("Core"))
+
+    for i, (_, v) in enumerate(groups):
         if len(v) > 2:
             for a, b in combinations(range(len(v)), 2):
                 ra, rb = v.iloc[a], v.iloc[b]
@@ -151,6 +143,8 @@ def run_mmp(processed_df, min_transform_occurrence):
                     [transform, delta]
                 )
 
+        progress_bar.progress((i + 1) / len(groups))
+
     if not delta_list:
         return None
 
@@ -163,12 +157,14 @@ def run_mmp(processed_df, min_transform_occurrence):
         ]
     )
 
-    # --- Aggregate transforms ---
+    # -------- STEP 3: Aggregate transforms --------
+    status.text("📊 Aggregating transforms and statistics...")
     mmp_list = []
-    for k, v in delta_df.groupby("Transform"):
-        if len(v) >= min_transform_occurrence:
+
+    for transform, v in delta_df.groupby("Transform"):
+        if len(v) >= min_occ:
             mmp_list.append({
-                "Transform": k,
+                "Transform": transform,
                 "Count": len(v),
                 "Deltas": v.Delta.values,
                 "mean_delta": v.Delta.mean(),
@@ -177,24 +173,24 @@ def run_mmp(processed_df, min_transform_occurrence):
                 "max_delta": v.Delta.max()
             })
 
-    if not mmp_list:
-        return None
-
     mmp_df = pd.DataFrame(mmp_list)
     mmp_df["rxn_mol"] = mmp_df.Transform.apply(
         lambda x: AllChem.ReactionFromSmarts(x, useSmiles=True)
     )
 
+    status.text("✅ MMP analysis completed")
+    progress_bar.progress(1.0)
+
     return row_df, delta_df, mmp_df
 
 
-# ================================
-# Sidebar – data input
-# ================================
-st.sidebar.header("📁 Input Data")
+# =========================================================
+# Sidebar – Input
+# =========================================================
+st.sidebar.header("📁 Upload Data")
 
 uploaded = st.sidebar.file_uploader(
-    "Upload CSV (SMILES, Activity required)",
+    "Upload CSV file",
     type=["csv"]
 )
 
@@ -205,13 +201,13 @@ min_occ = st.sidebar.slider(
 
 run_button = st.sidebar.button("🔬 Run MMP Analysis")
 
-# ================================
-# Load and prepare data
-# ================================
+# =========================================================
+# Main App
+# =========================================================
 if uploaded:
     df = pd.read_csv(uploaded)
 
-    st.subheader("📊 Raw Data Preview")
+    st.subheader("📄 Dataset Preview")
     st.dataframe(df.head())
 
     cols = df.columns.tolist()
@@ -220,8 +216,7 @@ if uploaded:
     name_col = st.selectbox("Name column (optional)", ["None"] + cols)
 
     if run_button:
-        with st.spinner("Running MMP analysis..."):
-
+        with st.spinner("Preparing molecules..."):
             proc_df = df.copy()
             proc_df["mol"] = proc_df[smiles_col].apply(Chem.MolFromSmiles)
             proc_df = proc_df[proc_df.mol.notnull()]
@@ -235,37 +230,36 @@ if uploaded:
             if name_col != "None":
                 proc_df = proc_df.rename(columns={name_col: "Name"})
             else:
-                proc_df["Name"] = [f"Mol_{i+1}" for i in range(len(proc_df))]
+                proc_df["Name"] = [
+                    f"Mol_{i+1}" for i in range(len(proc_df))
+                ]
 
-            row_df, delta_df, mmp_df = run_mmp(proc_df, min_occ)
+        result = run_mmp_with_progress(proc_df, min_occ)
+
+        if result is None:
+            st.error("No valid MMPs found.")
+        else:
+            row_df, delta_df, mmp_df = result
 
             st.success(f"✅ Found {len(mmp_df)} MMP transforms")
 
-            # ================================
-            # Results display
-            # ================================
-            st.header("🔬 MMP Results")
-
-            st.subheader("Top MMP Transforms")
+            st.subheader("🔬 MMP Summary")
             st.dataframe(
-                mmp_df[[
-                    "Transform", "Count",
-                    "mean_delta", "std_delta",
-                    "min_delta", "max_delta"
-                ]].sort_values("mean_delta"),
+                mmp_df[
+                    ["Transform", "Count",
+                     "mean_delta", "std_delta",
+                     "min_delta", "max_delta"]
+                ].sort_values("mean_delta"),
                 use_container_width=True
             )
 
-            st.subheader("All Molecular Pairs")
+            st.subheader("🧪 All Matched Pairs")
             st.dataframe(delta_df, use_container_width=True)
 
-            st.subheader("Fragment Table (Row DF)")
+            st.subheader("🧩 Fragment Table")
             st.dataframe(row_df, use_container_width=True)
 
-            # ================================
-            # Download
-            # ================================
-            st.subheader("📥 Download")
+            st.subheader("📥 Download Results")
             st.download_button(
                 "Download MMP Summary",
                 mmp_df.to_csv(index=False),
