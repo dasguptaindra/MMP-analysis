@@ -80,6 +80,14 @@ st.markdown("""
 # Title
 st.markdown('<h1 class="main-header">🧪 Matched Molecular Pair (MMP) Analysis Tool</h1>', unsafe_allow_html=True)
 
+# Add a disclaimer about fragmentation method
+st.markdown("""
+<div class="warning-box">
+⚠️ <strong>Note on Fragmentation Method:</strong> This tool uses an <strong>approximate fragmentation method</strong> that identifies single bonds for cutting. 
+For more accurate R-group identification, consider using RDKit's MMPA algorithm. The highlighted regions represent non-core atoms (approximation).
+</div>
+""", unsafe_allow_html=True)
+
 # Try to import RDKit with error handling
 try:
     from rdkit import Chem
@@ -153,6 +161,12 @@ with st.sidebar:
         This reduces noise and focuses on statistically significant transformations.
         """)
         
+        # Fragmentation method selection
+        st.markdown("### ⚗️ Fragmentation Method")
+        use_advanced_fragmentation = st.checkbox("Use advanced fragmentation (slower but more accurate)", 
+                                                value=False,
+                                                help="Uses RDKit's MMP algorithm when available")
+        
         # Debug option
         st.markdown("### 🐛 Debug")
         show_debug_info = st.checkbox("Show debug information", value=False)
@@ -172,12 +186,15 @@ with st.sidebar:
         3. Calculate ΔpIC50 for each pair
         4. Identify frequently occurring transformations
         
+        **Fragmentation Methods:**
+        - **Basic**: Approximate fragmentation by cutting single bonds
+        - **Advanced**: Uses RDKit's MMP algorithm (more accurate R-group identification)
+        
         **NEW:** Exact transformation display with highlighted changing regions
         """)
 
 # Helper functions (only define if RDKit is available)
 if RDKIT_AVAILABLE:
-    @st.cache_data
     def load_data(file, sanitize=True, kekulize=False):
         """Load and preprocess data"""
         if file is not None:
@@ -263,8 +280,8 @@ if RDKIT_AVAILABLE:
         except Exception as e:
             return []
 
-    def FragmentMol(mol, maxCuts=1):
-        """Simple fragmentation function - try to break single bonds"""
+    def simple_fragment_mol(mol, maxCuts=1):
+        """Simple fragmentation function - try to break single bonds (APPROXIMATE)"""
         results = []
         try:
             # Create a copy to avoid modifying original
@@ -297,8 +314,38 @@ if RDKIT_AVAILABLE:
         
         return results
 
-    def get_common_core(smiles1, smiles2):
-        """Find common core between two molecules"""
+    def advanced_fragment_mol(mol, maxCuts=1):
+        """Use RDKit's MMP algorithm for fragmentation (more accurate)"""
+        try:
+            # Try to import rdMMPA
+            from rdkit.Chem.rdMMPA import FragmentMol
+            
+            # Fragment using RDKit's MMP algorithm
+            fragments = FragmentMol(mol, maxCuts=maxCuts, resultsAsMols=False)
+            
+            results = []
+            for frag_smiles in fragments:
+                try:
+                    # Parse the SMILES to get fragments
+                    parts = frag_smiles.split(".")
+                    if len(parts) >= 2:
+                        # Reconstruct the fragmented molecule
+                        frag_mol = Chem.MolFromSmiles(frag_smiles.replace(".*", "[*]").replace("*.", "[*]"))
+                        if frag_mol:
+                            results.append((f"MMP_CUT", frag_mol))
+                except:
+                    continue
+            
+            return results
+        except ImportError:
+            st.warning("RDKit MMPA not available, falling back to simple fragmentation")
+            return simple_fragment_mol(mol, maxCuts)
+        except Exception as e:
+            st.warning(f"Advanced fragmentation failed: {e}, falling back to simple fragmentation")
+            return simple_fragment_mol(mol, maxCuts)
+
+    def get_common_core(smiles1, smiles2, max_atoms=50):
+        """Find common core between two molecules with size limit"""
         try:
             mol1 = Chem.MolFromSmiles(smiles1)
             mol2 = Chem.MolFromSmiles(smiles2)
@@ -306,18 +353,29 @@ if RDKIT_AVAILABLE:
             if mol1 is None or mol2 is None:
                 return None
             
-            # Find maximum common substructure
-            mcs = Chem.rdFMCS.FindMCS([mol1, mol2], timeout=30)
+            # Skip large molecules for performance
+            if mol1.GetNumAtoms() > max_atoms or mol2.GetNumAtoms() > max_atoms:
+                return None
+            
+            # Find maximum common substructure with timeout
+            mcs = Chem.rdFMCS.FindMCS([mol1, mol2], timeout=10, 
+                                      atomCompare=Chem.rdFMCS.AtomCompare.CompareElements,
+                                      bondCompare=Chem.rdFMCS.BondCompare.CompareOrder)
+            
             if mcs.numAtoms > 0:
                 core = Chem.MolFromSmarts(mcs.smartsString)
                 return core
-        except:
-            pass
+        except Exception as e:
+            return None
         return None
 
     def highlight_differences(mol1, mol2, transform, color1=(1.0, 0.42, 0.42), color2=(0.31, 0.80, 0.76)):
         """Highlight the changing parts in two molecules based on the transform"""
         try:
+            # Skip if molecules are too large
+            if mol1.GetNumAtoms() > 50 or mol2.GetNumAtoms() > 50:
+                return None, None
+            
             # Parse the transform to get R-groups
             parts = transform.split('>>')
             if len(parts) != 2:
@@ -333,43 +391,12 @@ if RDKIT_AVAILABLE:
             if rgroup1 is None or rgroup2 is None:
                 return None, None
             
-            # Find attachment points in R-groups
-            attachment_atom1 = None
-            attachment_atom2 = None
-            
-            for atom in rgroup1.GetAtoms():
-                if atom.GetSymbol() == '*':
-                    attachment_atom1 = atom.GetIdx()
-                    break
-            
-            for atom in rgroup2.GetAtoms():
-                if atom.GetSymbol() == '*':
-                    attachment_atom2 = atom.GetIdx()
-                    break
-            
-            if attachment_atom1 is None or attachment_atom2 is None:
-                return None, None
-            
-            # Get atoms connected to attachment point in R-groups (these are the changing atoms)
-            changing_atoms1 = set()
-            changing_atoms2 = set()
-            
-            # For R-group 1, get non-attachment atoms
-            for atom in rgroup1.GetAtoms():
-                if atom.GetIdx() != attachment_atom1:
-                    changing_atoms1.add(atom.GetIdx())
-            
-            # For R-group 2, get non-attachment atoms
-            for atom in rgroup2.GetAtoms():
-                if atom.GetIdx() != attachment_atom2:
-                    changing_atoms2.add(atom.GetIdx())
-            
             # Create atom maps for original molecules to find matching atoms
             mol1_copy = Chem.Mol(mol1)
             mol2_copy = Chem.Mol(mol2)
             
-            # Try to find the common core
-            core = get_common_core(Chem.MolToSmiles(mol1_copy), Chem.MolToSmiles(mol2_copy))
+            # Try to find the common core (with performance limit)
+            core = get_common_core(Chem.MolToSmiles(mol1_copy), Chem.MolToSmiles(mol2_copy), max_atoms=30)
             
             if core is not None:
                 # Find matches of core in each molecule
@@ -381,9 +408,13 @@ if RDKIT_AVAILABLE:
                     core_atoms1 = set(matches1[0])
                     core_atoms2 = set(matches2[0])
                     
-                    # The changing atoms are the ones NOT in the core
+                    # The changing atoms are the ones NOT in the core (APPROXIMATION)
                     highlight_atoms1 = [i for i in range(mol1_copy.GetNumAtoms()) if i not in core_atoms1]
                     highlight_atoms2 = [i for i in range(mol2_copy.GetNumAtoms()) if i not in core_atoms2]
+                    
+                    # Skip if too many atoms to highlight (likely wrong core)
+                    if len(highlight_atoms1) > 20 or len(highlight_atoms2) > 20:
+                        return None, None
                     
                     # Create highlighted images
                     drawer1 = rdMolDraw2D.MolDraw2DCairo(300, 300)
@@ -420,11 +451,12 @@ if RDKIT_AVAILABLE:
                     return base64.b64encode(img1).decode(), base64.b64encode(img2).decode()
             
         except Exception as e:
-            st.error(f"Error highlighting differences: {e}")
+            # Silently fail - highlighting is optional
+            return None, None
         
         return None, None
 
-    def perform_mmp_analysis(df, min_transform_occurrence, show_debug=False):
+    def perform_mmp_analysis(df, min_transform_occurrence, use_advanced_frag=False, show_debug=False):
         """Perform MMP analysis matching the original logic EXACTLY"""
         if df is None or len(df) == 0:
             return None, None
@@ -452,7 +484,12 @@ if RDKIT_AVAILABLE:
                 continue
                 
             try:
-                frag_list = FragmentMol(mol, maxCuts=1)
+                # Use selected fragmentation method
+                if use_advanced_frag:
+                    frag_list = advanced_fragment_mol(mol, maxCuts=1)
+                else:
+                    frag_list = simple_fragment_mol(mol, maxCuts=1)
+                    
                 for _, frag_mol in frag_list:
                     pair_list = sort_fragments(frag_mol)
                     if len(pair_list) >= 2:
@@ -771,11 +808,14 @@ if RDKIT_AVAILABLE:
                 mol_after = Chem.MolFromSmiles(after_row['SMILES'])
                 
                 if mol_before and mol_after:
-                    # Highlight differences
-                    img1_b64, img2_b64 = highlight_differences(
-                        mol_before, mol_after, before_row['Transform'],
-                        color1=color_before, color2=color_after
-                    )
+                    # Highlight differences with performance check
+                    if mol_before.GetNumAtoms() <= 50 and mol_after.GetNumAtoms() <= 50:
+                        img1_b64, img2_b64 = highlight_differences(
+                            mol_before, mol_after, before_row['Transform'],
+                            color1=color_before, color2=color_after
+                        )
+                    else:
+                        img1_b64, img2_b64 = None, None
                     
                     if img1_b64 and img2_b64:
                         # Display side by side
@@ -852,6 +892,7 @@ elif uploaded_file is not None:
     kekulize = kekulize_molecules
     show_debug = show_debug_info if 'show_debug_info' in locals() else False
     show_highlighted = show_highlighted_molecules if 'show_highlighted_molecules' in locals() else True
+    use_advanced_frag = use_advanced_fragmentation if 'use_advanced_fragmentation' in locals() else False
     
     # Load data
     df = load_data(uploaded_file, sanitize=sanitize, kekulize=kekulize)
@@ -870,7 +911,7 @@ elif uploaded_file is not None:
         # Perform MMP analysis
         st.markdown('<h2 class="section-header">🔍 MMP Analysis Results</h2>', unsafe_allow_html=True)
         
-        delta_df, mmp_df = perform_mmp_analysis(df, min_occurrence, show_debug)
+        delta_df, mmp_df = perform_mmp_analysis(df, min_occurrence, use_advanced_frag, show_debug)
         
         if delta_df is not None:
             # Show statistics
@@ -930,7 +971,7 @@ elif uploaded_file is not None:
                                         # Display molecules with highlighting
                                         if show_highlighted:
                                             st.markdown("### 🎨 Highlighted Molecules")
-                                            st.info(f"Red: Removed atoms/group | Green: Added atoms/group")
+                                            st.info(f"Red: Non-core atoms (approximation) | Green: Non-core atoms (approximation)")
                                             display_molecule_grid_with_highlight(
                                                 examples_df, 
                                                 highlight_color_before, 
@@ -982,7 +1023,7 @@ elif uploaded_file is not None:
                                         # Display molecules with highlighting
                                         if show_highlighted:
                                             st.markdown("### 🎨 Highlighted Molecules")
-                                            st.info(f"Red: Removed atoms/group | Green: Added atoms/group")
+                                            st.info(f"Red: Non-core atoms (approximation) | Green: Non-core atoms (approximation)")
                                             display_molecule_grid_with_highlight(
                                                 examples_df, 
                                                 highlight_color_before, 
@@ -1021,11 +1062,9 @@ elif uploaded_file is not None:
                     st.markdown('<h3 class="section-header">💾 Export Results</h3>', unsafe_allow_html=True)
                     
                     # Create downloadable files
-                    @st.cache_data
                     def convert_df_to_csv(df):
                         return df.to_csv(index=False).encode('utf-8')
                     
-                    @st.cache_data
                     def convert_df_to_excel(df):
                         output = io.BytesIO()
                         with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -1073,6 +1112,7 @@ else:
     - **Exact transformation display**: Shows [CH3]*>>[NH2]* instead of [CH4]*->>[NH3]*
     - **Highlighted compounds**: Changing regions are highlighted in molecules
     - **Human-readable descriptions**: Get clear descriptions of transformations
+    - **Advanced fragmentation option**: More accurate R-group identification
     
     ### How to use:
     1. **Upload your data** using the sidebar on the left
@@ -1120,9 +1160,9 @@ else:
 st.markdown("---")
 st.markdown("""
 <div style="text-align: center; color: #6B7280; font-size: 0.9rem;">
-    <p>MMP Analysis Tool v1.1 | Built with Streamlit, RDKit, and Pandas</p>
-    <p><strong>New:</strong> Exact transformation display with molecule highlighting</p>
+    <p>MMP Analysis Tool v1.2 | Built with Streamlit, RDKit, and Pandas</p>
+    <p><strong>New:</strong> Exact transformation display with molecule highlighting | Advanced fragmentation option</p>
+    <p><strong>Note:</strong> Uses approximate fragmentation method. Highlighted regions represent non-core atoms.</p>
     <p>For research use only. Always validate computational predictions with experimental data.</p>
 </div>
 """, unsafe_allow_html=True)
-
