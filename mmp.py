@@ -57,19 +57,26 @@ def perform_mmp_analysis(df, min_occurrence):
         pIC50 = row.pIC50
         smiles = row.SMILES
 
-        frags = FragmentMol(mol, maxCuts=1, resultsAsMols=True)
+       frags = FragmentMol(mol, maxCuts=1, resultsAsMols=True)
 
-        for core, chains in frags:
-            core_smiles = Chem.MolToSmiles(core)
-            r_smiles = Chem.MolToSmiles(chains[0])
+for core, chains in frags:
 
-            row_list.append([
-                smiles,
-                core_smiles,
-                r_smiles,
-                name,
-                pIC50
-            ])
+    # 🔒 SAFETY CHECKS (CRITICAL)
+    if core is None:
+        continue
+    if not chains or chains[0] is None:
+        continue
+
+    core_smiles = Chem.MolToSmiles(core)
+    r_smiles = Chem.MolToSmiles(chains[0])
+
+    row_list.append([
+        smiles,
+        core_smiles,
+        r_smiles,
+        name,
+        pIC50
+    ])
 
     # 🔒 LOCK STRUCTURE (CRITICAL)
     row_df = pd.DataFrame(
@@ -165,4 +172,5 @@ if uploaded_file:
 
 else:
     st.info("Upload a CSV file to start")
+
 
