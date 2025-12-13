@@ -1067,7 +1067,6 @@ else:
     st.markdown("""
     ## Welcome to the MMP Analysis Tool! 
     
-    This tool performs **Matched Molecular Pair (MMP) analysis** to identify structural transformations that affect compound potency.
     
     ### How to use:
     1. **Upload your data** using the sidebar on the left
@@ -1100,6 +1099,7 @@ st.markdown("""
     <p>For research use only. Always validate computational predictions with experimental data.</p>
 </div>
 """, unsafe_allow_html=True)
+
 
 
 
