@@ -78,7 +78,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Title
-st.markdown('<h1 class="main-header">🧪 Matched Molecular Pair (MMP) Analysis Tool</h1>', unsafe_allow_html=True)
+st.markdown('<h1 class="main-header"> Matched Molecular Pair (MMP) Analysis Tool</h1>', unsafe_allow_html=True)
 
 # Try to import RDKit with error handling
 try:
@@ -1069,11 +1069,6 @@ else:
     
     This tool performs **Matched Molecular Pair (MMP) analysis** to identify structural transformations that affect compound potency.
     
-    ### 🆕 New Features:
-    - **Exact transformation display**: Shows [CH3]*>>[NH2]* instead of [CH4]*->>[NH3]*
-    - **Highlighted compounds**: Changing regions are highlighted in molecules
-    - **Human-readable descriptions**: Get clear descriptions of transformations
-    
     ### How to use:
     1. **Upload your data** using the sidebar on the left
     2. **Configure parameters** like minimum transform occurrences
@@ -1125,5 +1120,6 @@ st.markdown("""
     <p>For research use only. Always validate computational predictions with experimental data.</p>
 </div>
 """, unsafe_allow_html=True)
+
 
 
