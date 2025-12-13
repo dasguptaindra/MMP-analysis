@@ -27,6 +27,7 @@ Explore matched molecular pair (MMP) analysis interactively using the Streamlit-
 5. **The implementation is inspired by the matched molecular pair workflow demonstrated in Pat Walters’ Practical Cheminformatics Tutorials.**
 
 📜 **License**
+
 **For academic and research use only.**
 
 👨‍🔬 **Author Notes**
