@@ -16,7 +16,7 @@ warnings.filterwarnings('ignore')
 
 # Page configuration
 st.set_page_config(
-    page_title="Advanced MMP Analysis Tool",
+    page_title="Advanced MMP Analysis Tool (Single Cut)",
     page_icon="🧪",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -95,7 +95,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Title
-st.markdown('<h1 class="main-header">🧪 Advanced MMP Analysis Tool</h1>', unsafe_allow_html=True)
+st.markdown('<h1 class="main-header">🧪 Advanced MMP Analysis Tool (Single Cut)</h1>', unsafe_allow_html=True)
 
 # Try to import RDKit with error handling
 try:
@@ -124,27 +124,27 @@ with st.sidebar:
     if uploaded_file and RDKIT_AVAILABLE:
         st.markdown("### ⚙️ Analysis Parameters")
         
-        # Pair generation strategy
-        st.markdown("#### 🔗 Pair Generation Strategy")
-        pair_strategy = st.selectbox(
-            "Select pair generation method",
-            ["Core-based (Standard)", "Fragment-based (Comprehensive)", "Murcko Scaffold", "All Pairs (Debug)"],
-            help="Core-based: Groups by exact core SMILES\nFragment-based: Uses all possible fragments\nMurcko: Groups by Bemis-Murcko scaffolds"
+        # MMPA method selection
+        st.markdown("#### 🔗 MMPA Method")
+        mmpa_method = st.selectbox(
+            "Select MMPA method",
+            ["Standard Single Cut", "Side-chain Only", "Exhaustive Single Cut"],
+            help="Standard: Single non-ring cuts\nSide-chain: Only terminal cuts\nExhaustive: All single cuts including rings"
         )
         
         # Minimum requirements
         st.markdown("#### 📊 Minimum Requirements")
-        min_pairs_per_core = st.slider("Minimum compounds per core", 2, 10, 3,
+        min_pairs_per_core = st.slider("Minimum compounds per core", 2, 10, 2,
                                       help="Minimum number of compounds sharing the same core")
-        min_transform_occurrence = st.slider("Minimum transform occurrences", 1, 20, 2,
+        min_transform_occurrence = st.slider("Minimum transform occurrences", 1, 20, 1,
                                            help="Minimum occurrences for statistical significance")
         
-        # Fragmentation settings
-        st.markdown("#### 🪓 Fragmentation Settings")
-        max_bond_cuts = st.slider("Maximum bond cuts", 1, 3, 2,
-                                 help="Maximum number of bonds to cut simultaneously")
-        allow_ring_cuts = st.checkbox("Allow ring cuts", value=False,
-                                     help="Allow cutting bonds in rings (may produce small fragments)")
+        # Fragment filters
+        st.markdown("#### 🪓 Fragment Filters")
+        min_core_atoms = st.slider("Minimum core atoms", 5, 50, 10,
+                                  help="Minimum number of atoms in core fragment")
+        max_rgroup_atoms = st.slider("Maximum R-group atoms", 5, 50, 20,
+                                   help="Maximum number of atoms in R-group")
         
         # Property filters
         st.markdown("#### 🔍 Property Filters")
@@ -156,8 +156,8 @@ with st.sidebar:
         # Display options
         st.markdown("### 👀 Display Options")
         n_top_transforms = st.slider("Top transforms to display", 1, 50, 10)
+        show_fragment_images = st.checkbox("Show fragment images", value=True)
         show_detailed_debug = st.checkbox("Show detailed debug info", value=False)
-        show_fragment_analysis = st.checkbox("Show fragment analysis", value=True)
         
         # Export options
         st.markdown("### 💾 Export")
@@ -166,20 +166,23 @@ with st.sidebar:
         # About
         with st.expander("ℹ️ About This Tool"):
             st.markdown("""
-            **Advanced MMP Analysis Tool**
+            **Advanced MMP Analysis Tool (Single Cut)**
             
-            This tool uses multiple strategies for MMP analysis:
+            This tool uses RDKit's MMPA for single-cut analysis:
             
-            1. **Core-based**: Standard MMP with exact core matching
-            2. **Fragment-based**: Comprehensive analysis using all fragments
-            3. **Murcko Scaffold**: Groups by Bemis-Murcko scaffolds
-            4. **All Pairs**: Debug mode to see all possible pairs
+            1. **Standard Single Cut**: Single non-ring bond cuts only
+            2. **Side-chain Only**: Only terminal bond cuts
+            3. **Exhaustive Single Cut**: All single bond cuts including rings
+            
+            **Key Features:**
+            - Uses RDKit's rdMMPA.FragmentMol for robust fragmentation
+            - Filters fragments by size and properties
+            - Generates statistically significant transforms
             
             **Tips for success:**
-            - Start with larger datasets (>50 compounds)
-            - Use lower minimum requirements initially
-            - Try different fragmentation settings
-            - Check debug info if no pairs are found
+            - Start with larger datasets (>20 compounds)
+            - Adjust minimum core size to match your scaffolds
+            - Check fragment images to validate cuts
             """)
 
 # Helper functions
@@ -253,6 +256,7 @@ if RDKIT_AVAILABLE:
             final_df['HBA'] = [Descriptors.NumHAcceptors(mol) for mol in molecules]
             final_df['HBD'] = [Descriptors.NumHDonors(mol) for mol in molecules]
             final_df['TPSA'] = [Descriptors.TPSA(mol) for mol in molecules]
+            final_df['RotatableBonds'] = [Descriptors.NumRotatableBonds(mol) for mol in molecules]
             
             st.success(f"Loaded {len(final_df)} valid compounds")
             return final_df
@@ -261,190 +265,277 @@ if RDKIT_AVAILABLE:
             st.error(f"Error loading file: {e}")
             return None
     
-    def get_murcko_scaffold(mol):
-        """Get Murcko scaffold SMILES for a molecule"""
-        try:
-            scaffold = MurckoScaffold.GetScaffoldForMol(mol)
-            return Chem.MolToSmiles(scaffold)
-        except:
-            return None
-    
-    def generate_fragments_advanced(mol, max_cuts=2, allow_ring_cuts=False):
-        """Generate fragments using RDKit MMPA with advanced options"""
+    def generate_fragments_single_cut(mol, method="standard"):
+        """Generate fragments using RDKit MMPA with single cuts only"""
         fragments = []
         
         try:
-            # Use RDKit's FragmentMol for systematic fragmentation
-            results = rdMMPA.FragmentMol(
-                mol,
-                maxCuts=max_cuts,
-                maxCutBonds=20,
-                pattern="[*:1]~[*:2]",
-                resultsAsMols=False
-            )
-            
-            for core_smiles, rgroup_smiles in results:
-                # Clean the SMILES for consistency
-                core_smiles = core_smiles.replace('[*:1]', '*').replace('[*:2]', '*')
-                rgroup_smiles = rgroup_smiles.replace('[*:1]', '*').replace('[*:2]', '*')
-                
-                # Skip very small cores
-                core_mol = Chem.MolFromSmiles(core_smiles)
-                if core_mol and core_mol.GetNumAtoms() >= 5:
-                    fragments.append({
-                        'core_smiles': core_smiles,
-                        'rgroup_smiles': rgroup_smiles,
-                        'core_num_atoms': core_mol.GetNumAtoms()
-                    })
-                    
-        except Exception as e:
-            # Fallback to single bond cutting
-            try:
+            if method == "Side-chain Only":
+                # Only cut terminal bonds (bonds where one atom has degree 1)
                 for bond in mol.GetBonds():
-                    if bond.GetBondType() == Chem.BondType.SINGLE:
-                        if not allow_ring_cuts and bond.IsInRing():
+                    a1 = bond.GetBeginAtom()
+                    a2 = bond.GetEndAtom()
+                    if (a1.GetDegree() == 1 or a2.GetDegree() == 1) and not bond.IsInRing():
+                        try:
+                            emol = Chem.EditableMol(mol)
+                            emol.RemoveBond(a1.GetIdx(), a2.GetIdx())
+                            frag_mol = emol.GetMol()
+                            
+                            frags = Chem.GetMolFrags(frag_mol, asMols=True, sanitizeFrags=False)
+                            if len(frags) == 2:
+                                # Sort by size (largest first as core)
+                                frags_sorted = sorted(frags, key=lambda x: x.GetNumAtoms(), reverse=True)
+                                
+                                core_mol = frags_sorted[0]
+                                rgroup_mol = frags_sorted[1]
+                                
+                                # Check size constraints
+                                if (core_mol.GetNumAtoms() >= min_core_atoms and 
+                                    rgroup_mol.GetNumAtoms() <= max_rgroup_atoms):
+                                    
+                                    # Add attachment points
+                                    core_smiles = Chem.MolToSmiles(core_mol) + '[*]'
+                                    rgroup_smiles = Chem.MolToSmiles(rgroup_mol) + '[*]'
+                                    
+                                    fragments.append({
+                                        'core_mol': core_mol,
+                                        'rgroup_mol': rgroup_mol,
+                                        'core_smiles': core_smiles,
+                                        'rgroup_smiles': rgroup_smiles,
+                                        'core_size': core_mol.GetNumAtoms(),
+                                        'rgroup_size': rgroup_mol.GetNumAtoms(),
+                                        'bond_type': str(bond.GetBondType()),
+                                        'is_ring': bond.IsInRing(),
+                                        'is_terminal': (a1.GetDegree() == 1 or a2.GetDegree() == 1)
+                                    })
+                        except:
                             continue
+            
+            else:
+                # Use RDKit's FragmentMol for systematic single bond fragmentation
+                max_cuts = 1  # Single cuts only
+                
+                if method == "Exhaustive Single Cut":
+                    # Allow all single bond cuts including rings
+                    results = rdMMPA.FragmentMol(
+                        mol,
+                        maxCuts=max_cuts,
+                        maxCutBonds=100,  # High number for exhaustive
+                        pattern="[*:1]~[*:2]",
+                        resultsAsMols=False
+                    )
+                else:  # Standard Single Cut
+                    # More conservative settings
+                    results = rdMMPA.FragmentMol(
+                        mol,
+                        maxCuts=max_cuts,
+                        maxCutBonds=50,
+                        pattern="[*:1]-[*:2]",  # Only single bonds
+                        resultsAsMols=False
+                    )
+                
+                for core_smiles, rgroup_smiles in results:
+                    try:
+                        # Clean the SMILES
+                        core_smiles = core_smiles.replace('[*:1]', '*').replace('[*:2]', '*')
+                        rgroup_smiles = rgroup_smiles.replace('[*:1]', '*').replace('[*:2]', '*')
                         
-                        emol = Chem.EditableMol(mol)
-                        emol.RemoveBond(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())
-                        frag_mol = emol.GetMol()
+                        # Convert back to molecules for validation
+                        core_mol = Chem.MolFromSmiles(core_smiles)
+                        rgroup_mol = Chem.MolFromSmiles(rgroup_smiles)
                         
-                        frags = Chem.GetMolFrags(frag_mol, asMols=True, sanitizeFrags=False)
-                        if len(frags) == 2:
-                            # Sort by size (largest first as core)
-                            frags_sorted = sorted(frags, key=lambda x: x.GetNumAtoms(), reverse=True)
-                            core_smiles = Chem.MolToSmiles(frags_sorted[0])
-                            rgroup_smiles = Chem.MolToSmiles(frags_sorted[1])
-                            
-                            # Add attachment point
-                            core_smiles = core_smiles + '[*]'
-                            rgroup_smiles = rgroup_smiles + '[*]'
-                            
-                            fragments.append({
-                                'core_smiles': core_smiles,
-                                'rgroup_smiles': rgroup_smiles,
-                                'core_num_atoms': frags_sorted[0].GetNumAtoms()
-                            })
-            except:
-                pass
+                        if core_mol and rgroup_mol:
+                            # Check size constraints
+                            if (core_mol.GetNumAtoms() >= min_core_atoms and 
+                                rgroup_mol.GetNumAtoms() <= max_rgroup_atoms):
+                                
+                                # Standardize attachment points
+                                core_smiles_clean = core_smiles.replace('[*:1]', '*').replace('[*:2]', '*')
+                                rgroup_smiles_clean = rgroup_smiles.replace('[*:1]', '*').replace('[*:2]', '*')
+                                
+                                fragments.append({
+                                    'core_mol': core_mol,
+                                    'rgroup_mol': rgroup_mol,
+                                    'core_smiles': core_smiles_clean,
+                                    'rgroup_smiles': rgroup_smiles_clean,
+                                    'core_size': core_mol.GetNumAtoms(),
+                                    'rgroup_size': rgroup_mol.GetNumAtoms(),
+                                    'bond_type': 'Single',
+                                    'is_ring': False,  # RDKit handles ring vs non-ring
+                                    'is_terminal': False
+                                })
+                    except:
+                        continue
+        
+        except Exception as e:
+            st.warning(f"Error in fragmentation: {e}")
         
         return fragments
     
-    def perform_mmp_analysis_robust(df, strategy, min_pairs_per_core, show_debug=False):
-        """Perform MMP analysis with robust pair generation"""
+    def visualize_fragments(compound_name, mol, fragments):
+        """Visualize fragmentation results"""
+        if not fragments or not show_fragment_images:
+            return
         
-        st.info(f"Starting MMP analysis using {strategy} strategy...")
+        st.markdown(f"**Fragmentation for {compound_name}**")
+        
+        # Create a grid of images
+        n_frags = min(len(fragments), 6)  # Show max 6 fragments
+        cols = st.columns(3)
+        
+        for idx in range(0, n_frags, 3):
+            for col_idx, col in enumerate(cols):
+                frag_idx = idx + col_idx
+                if frag_idx < n_frags:
+                    frag = fragments[frag_idx]
+                    
+                    # Create combined visualization
+                    try:
+                        # Create molecule with attachment point highlighted
+                        core_with_attach = Chem.MolFromSmiles(frag['core_smiles'].replace('[*]', '[#0]'))
+                        rgroup_with_attach = Chem.MolFromSmiles(frag['rgroup_smiles'].replace('[*]', '[#0]'))
+                        
+                        if core_with_attach and rgroup_with_attach:
+                            # Highlight attachment point
+                            for atom in core_with_attach.GetAtoms():
+                                if atom.GetAtomicNum() == 0:
+                                    atom.SetProp("atomNote", "Attachment")
+                            
+                            img = Draw.MolsToGridImage(
+                                [core_with_attach, rgroup_with_attach],
+                                molsPerRow=2,
+                                subImgSize=(200, 150),
+                                legends=[f"Core ({frag['core_size']} atoms)", 
+                                        f"R-group ({frag['rgroup_size']} atoms)"]
+                            )
+                            
+                            col.image(img, use_container_width=True)
+                            col.caption(f"SMILES: {frag['core_smiles'][:30]}...")
+                    except:
+                        pass
+    
+    def perform_mmp_analysis_single_cut(df, method, min_pairs_per_core, show_debug=False):
+        """Perform MMP analysis with single cuts only"""
+        
+        st.info(f"Starting MMP analysis using {method} method...")
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # Step 1: Generate fragments or scaffolds
-        status_text.text("Step 1/4: Generating molecular representations...")
+        # Step 1: Generate fragments for all compounds
+        status_text.text("Step 1/4: Generating fragments...")
         progress_bar.progress(25)
         
-        compound_data = []
+        compound_fragments = {}
+        all_fragments = []
         
         for idx, row in df.iterrows():
             mol = row['mol']
+            fragments = generate_fragments_single_cut(mol, method)
             
-            if strategy == "Murcko Scaffold":
-                # Use Murcko scaffolds
-                scaffold_smiles = get_murcko_scaffold(mol)
-                if scaffold_smiles:
-                    compound_data.append({
-                        'idx': idx,
-                        'name': row['Name'],
-                        'smiles': row['SMILES'],
-                        'pIC50': row['pIC50'],
-                        'core': scaffold_smiles,
-                        'rgroup': '',  # Not applicable for scaffolds
-                        'type': 'scaffold'
-                    })
+            compound_fragments[idx] = {
+                'name': row['Name'],
+                'smiles': row['SMILES'],
+                'pIC50': row['pIC50'],
+                'fragments': fragments,
+                'mol': mol
+            }
             
-            elif strategy == "All Pairs (Debug)":
-                # Just store molecule info
-                compound_data.append({
-                    'idx': idx,
-                    'name': row['Name'],
-                    'smiles': row['SMILES'],
-                    'pIC50': row['pIC50'],
-                    'core': f"ALL_{idx}",
-                    'rgroup': '',
-                    'type': 'all_pairs'
-                })
+            all_fragments.extend(fragments)
             
-            else:
-                # Generate fragments
-                fragments = generate_fragments_advanced(
-                    mol, 
-                    max_cuts=max_bond_cuts,
-                    allow_ring_cuts=allow_ring_cuts
-                )
-                
-                for frag in fragments:
-                    compound_data.append({
-                        'idx': idx,
-                        'name': row['Name'],
-                        'smiles': row['SMILES'],
-                        'pIC50': row['pIC50'],
-                        'core': frag['core_smiles'],
-                        'rgroup': frag['rgroup_smiles'],
-                        'type': 'fragment',
-                        'core_size': frag['core_num_atoms']
-                    })
+            # Show fragment visualization for first few compounds
+            if idx < 3 and show_fragment_images:
+                visualize_fragments(row['Name'], mol, fragments)
         
-        if not compound_data:
-            st.error("No compound data generated. Try different fragmentation settings.")
+        if not all_fragments:
+            st.error(f"No fragments generated with {method} method. Try:")
+            st.markdown("""
+            1. Reduce minimum core atoms (currently {min_core_atoms})
+            2. Increase maximum R-group atoms (currently {max_rgroup_atoms})
+            3. Try 'Exhaustive Single Cut' method
+            4. Check if molecules have cuttable bonds
+            """.format(min_core_atoms=min_core_atoms, max_rgroup_atoms=max_rgroup_atoms))
             return None, None
         
         # Debug: Show fragment statistics
         if show_debug:
             with st.expander("📊 Fragment Statistics", expanded=False):
-                frag_df = pd.DataFrame(compound_data)
-                st.write(f"Total representations: {len(frag_df)}")
-                st.write(f"Unique cores: {frag_df['core'].nunique()}")
-                st.write(f"Average fragments per compound: {len(frag_df)/len(df):.1f}")
+                frag_df = pd.DataFrame(all_fragments)
+                st.write(f"Total fragments generated: {len(all_fragments)}")
+                st.write(f"Average fragments per compound: {len(all_fragments)/len(df):.1f}")
                 
-                if 'core_size' in frag_df.columns:
-                    st.write(f"Average core size: {frag_df['core_size'].mean():.1f} atoms")
-                    st.write(f"Core size distribution:")
-                    fig, ax = plt.subplots(figsize=(8, 3))
-                    ax.hist(frag_df['core_size'].dropna(), bins=20, alpha=0.7, color='blue')
-                    ax.set_xlabel('Core atoms')
-                    ax.set_ylabel('Frequency')
+                if len(frag_df) > 0:
+                    st.write(f"Core size range: {frag_df['core_size'].min()} - {frag_df['core_size'].max()} atoms")
+                    st.write(f"R-group size range: {frag_df['rgroup_size'].min()} - {frag_df['rgroup_size'].max()} atoms")
+                    
+                    # Plot size distributions
+                    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 3))
+                    
+                    ax1.hist(frag_df['core_size'], bins=20, alpha=0.7, color='blue')
+                    ax1.set_xlabel('Core atoms')
+                    ax1.set_ylabel('Frequency')
+                    ax1.set_title('Core Size Distribution')
+                    
+                    ax2.hist(frag_df['rgroup_size'], bins=20, alpha=0.7, color='green')
+                    ax2.set_xlabel('R-group atoms')
+                    ax2.set_ylabel('Frequency')
+                    ax2.set_title('R-group Size Distribution')
+                    
+                    plt.tight_layout()
                     st.pyplot(fig)
         
-        # Step 2: Group compounds by core
-        status_text.text("Step 2/4: Grouping compounds by common features...")
+        # Step 2: Group compounds by common cores
+        status_text.text("Step 2/4: Grouping by common cores...")
         progress_bar.progress(50)
         
-        core_groups = defaultdict(list)
-        for data in compound_data:
-            core_groups[data['core']].append(data)
+        core_to_compounds = defaultdict(list)
+        
+        for comp_idx, comp_data in compound_fragments.items():
+            seen_cores = set()
+            for frag in comp_data['fragments']:
+                core_smiles = frag['core_smiles']
+                
+                # Avoid adding same compound multiple times for same core
+                if core_smiles not in seen_cores:
+                    core_to_compounds[core_smiles].append({
+                        'comp_idx': comp_idx,
+                        'name': comp_data['name'],
+                        'smiles': comp_data['smiles'],
+                        'pIC50': comp_data['pIC50'],
+                        'rgroup_smiles': frag['rgroup_smiles'],
+                        'core_mol': frag['core_mol'],
+                        'rgroup_mol': frag['rgroup_mol']
+                    })
+                    seen_cores.add(core_smiles)
         
         # Filter groups by minimum size
-        valid_groups = {core: comps for core, comps in core_groups.items() 
+        valid_groups = {core: comps for core, comps in core_to_compounds.items() 
                        if len(comps) >= min_pairs_per_core}
         
         if not valid_groups:
-            st.warning(f"No cores found with {min_pairs_per_core}+ compounds. Try reducing threshold.")
+            st.warning(f"No cores found with {min_pairs_per_core}+ compounds. Try:")
+            st.markdown(f"""
+            1. Reduce minimum compounds per core (currently {min_pairs_per_core})
+            2. Reduce minimum core atoms (currently {min_core_atoms})
+            3. Check if fragments are being generated correctly
+            """)
             return None, None
         
         # Debug: Show group statistics
         if show_debug:
             with st.expander("📊 Group Statistics", expanded=False):
-                st.write(f"Total groups: {len(core_groups)}")
-                st.write(f"Valid groups (≥{min_pairs_per_core} compounds): {len(valid_groups)}")
+                st.write(f"Total unique cores: {len(core_to_compounds)}")
+                st.write(f"Valid cores (≥{min_pairs_per_core} compounds): {len(valid_groups)}")
                 
                 group_sizes = [len(comps) for comps in valid_groups.values()]
-                if group_sizes:
-                    st.write(f"Average group size: {np.mean(group_sizes):.1f}")
-                    st.write(f"Largest group: {max(group_sizes)} compounds")
-                    
-                    # Show top 10 largest groups
-                    st.subheader("Top 10 largest groups:")
-                    top_groups = sorted(valid_groups.items(), key=lambda x: len(x[1]), reverse=True)[:10]
-                    for core, comps in top_groups:
-                        st.write(f"Core: {core[:50]}... | Compounds: {len(comps)}")
+                st.write(f"Average group size: {np.mean(group_sizes):.1f}")
+                st.write(f"Largest group: {max(group_sizes)} compounds")
+                
+                # Show top 10 cores
+                st.subheader("Top 10 largest cores:")
+                top_cores = sorted(valid_groups.items(), key=lambda x: len(x[1]), reverse=True)[:10]
+                for core, comps in top_cores:
+                    st.write(f"Core SMILES: {core[:60]}...")
+                    st.write(f"  Compounds: {len(comps)} | Core size: {comps[0]['core_mol'].GetNumAtoms()} atoms")
         
         # Step 3: Generate pairs
         status_text.text("Step 3/4: Generating molecular pairs...")
@@ -460,30 +551,30 @@ if RDKIT_AVAILABLE:
                     comp2 = compounds[j]
                     
                     # Skip if same compound
-                    if comp1['idx'] == comp2['idx']:
+                    if comp1['comp_idx'] == comp2['comp_idx']:
                         continue
                     
-                    # Calculate delta
+                    # Calculate delta pIC50
                     delta = comp2['pIC50'] - comp1['pIC50']
                     
                     # Create transform string
-                    if strategy in ["Core-based (Standard)", "Fragment-based (Comprehensive)"]:
-                        transform = f"{comp1['rgroup']}>>{comp2['rgroup']}"
-                    else:
-                        transform = f"{core}_transform"
+                    transform = f"{comp1['rgroup_smiles']}>>{comp2['rgroup_smiles']}"
                     
                     # Store pair
                     all_pairs.append({
-                        'Core': core,
-                        'SMILES_1': comp1['smiles'],
-                        'Name_1': comp1['name'],
-                        'pIC50_1': comp1['pIC50'],
-                        'SMILES_2': comp2['smiles'],
-                        'Name_2': comp2['name'],
-                        'pIC50_2': comp2['pIC50'],
+                        'Core_SMILES': core,
+                        'Core_Atoms': comp1['core_mol'].GetNumAtoms(),
+                        'Compound1_Name': comp1['name'],
+                        'Compound1_SMILES': comp1['smiles'],
+                        'Compound1_pIC50': comp1['pIC50'],
+                        'Compound1_Rgroup': comp1['rgroup_smiles'],
+                        'Compound2_Name': comp2['name'],
+                        'Compound2_SMILES': comp2['smiles'],
+                        'Compound2_pIC50': comp2['pIC50'],
+                        'Compound2_Rgroup': comp2['rgroup_smiles'],
                         'Transform': transform,
-                        'Delta': delta,
-                        'Strategy': strategy
+                        'Delta_pIC50': delta,
+                        'Method': method
                     })
         
         if not all_pairs:
@@ -496,36 +587,35 @@ if RDKIT_AVAILABLE:
         status_text.text("Step 4/4: Analyzing transformations...")
         progress_bar.progress(95)
         
-        if strategy == "All Pairs (Debug)":
-            # For debug mode, just return pairs
-            transforms_df = None
+        # Group by transform and calculate statistics
+        transform_data = []
+        for transform, group in pairs_df.groupby('Transform'):
+            count = len(group)
+            if count >= min_transform_occurrence:
+                deltas = group['Delta_pIC50'].values
+                transform_data.append({
+                    'Transform': transform,
+                    'Count': count,
+                    'Mean_ΔpIC50': np.mean(deltas),
+                    'Median_ΔpIC50': np.median(deltas),
+                    'Std_ΔpIC50': np.std(deltas),
+                    'Min_ΔpIC50': np.min(deltas),
+                    'Max_ΔpIC50': np.max(deltas),
+                    'Deltas': deltas,
+                    'Example_Names': f"{group.iloc[0]['Compound1_Name']}→{group.iloc[0]['Compound2_Name']}",
+                    'Example_SMILES_1': group.iloc[0]['Compound1_SMILES'],
+                    'Example_SMILES_2': group.iloc[0]['Compound2_SMILES'],
+                    'Example_Rgroup_1': group.iloc[0]['Compound1_Rgroup'],
+                    'Example_Rgroup_2': group.iloc[0]['Compound2_Rgroup'],
+                    'Common_Core': group.iloc[0]['Core_SMILES']
+                })
+        
+        if transform_data:
+            transforms_df = pd.DataFrame(transform_data)
+            transforms_df = transforms_df.sort_values('Mean_ΔpIC50', ascending=False)
         else:
-            # Group by transform and calculate statistics
-            transform_data = []
-            for transform, group in pairs_df.groupby('Transform'):
-                count = len(group)
-                if count >= min_transform_occurrence:
-                    deltas = group['Delta'].values
-                    transform_data.append({
-                        'Transform': transform,
-                        'Count': count,
-                        'Mean_ΔpIC50': np.mean(deltas),
-                        'Median_ΔpIC50': np.median(deltas),
-                        'Std_ΔpIC50': np.std(deltas),
-                        'Min_ΔpIC50': np.min(deltas),
-                        'Max_ΔpIC50': np.max(deltas),
-                        'Deltas': deltas,
-                        'Example_Names': f"{group.iloc[0]['Name_1']}→{group.iloc[0]['Name_2']}",
-                        'Example_SMILES_1': group.iloc[0]['SMILES_1'],
-                        'Example_SMILES_2': group.iloc[0]['SMILES_2']
-                    })
-            
-            if transform_data:
-                transforms_df = pd.DataFrame(transform_data)
-                transforms_df = transforms_df.sort_values('Mean_ΔpIC50', ascending=False)
-            else:
-                transforms_df = None
-                st.info(f"No transforms found with {min_transform_occurrence}+ occurrences")
+            transforms_df = None
+            st.info(f"No transforms found with {min_transform_occurrence}+ occurrences")
         
         progress_bar.progress(100)
         status_text.text("Analysis complete!")
@@ -539,18 +629,18 @@ if RDKIT_AVAILABLE:
             return
         
         # Create tabs for different visualizations
-        tab1, tab2, tab3 = st.tabs(["📈 Delta Distribution", "🔗 Pair Statistics", "🧪 Top Transforms"])
+        tab1, tab2, tab3, tab4 = st.tabs(["📈 Delta Distribution", "🔗 Pair Statistics", "🧪 Top Transforms", "🔍 Core Analysis"])
         
         with tab1:
             # Delta distribution
             fig, ax = plt.subplots(figsize=(10, 4))
             
             # Histogram
-            ax.hist(pairs_df['Delta'], bins=30, alpha=0.7, color='skyblue', edgecolor='black')
+            ax.hist(pairs_df['Delta_pIC50'], bins=30, alpha=0.7, color='skyblue', edgecolor='black')
             
             # Add statistics lines
-            mean_delta = pairs_df['Delta'].mean()
-            median_delta = pairs_df['Delta'].median()
+            mean_delta = pairs_df['Delta_pIC50'].mean()
+            median_delta = pairs_df['Delta_pIC50'].median()
             
             ax.axvline(mean_delta, color='red', linestyle='--', linewidth=2, 
                       label=f'Mean: {mean_delta:.2f}')
@@ -567,10 +657,10 @@ if RDKIT_AVAILABLE:
             # Add statistics box
             stats_text = f"""Total Pairs: {len(pairs_df)}
 Mean Δ: {mean_delta:.2f}
-Std Δ: {pairs_df['Delta'].std():.2f}
-Range: [{pairs_df['Delta'].min():.2f}, {pairs_df['Delta'].max():.2f}]
-Positive Δ: {(pairs_df['Delta'] > 0).sum()} ({100*(pairs_df['Delta'] > 0).mean():.1f}%)
-Significant (|Δ|>1): {(abs(pairs_df['Delta']) > 1).sum()}"""
+Std Δ: {pairs_df['Delta_pIC50'].std():.2f}
+Range: [{pairs_df['Delta_pIC50'].min():.2f}, {pairs_df['Delta_pIC50'].max():.2f}]
+Positive Δ: {(pairs_df['Delta_pIC50'] > 0).sum()} ({100*(pairs_df['Delta_pIC50'] > 0).mean():.1f}%)
+Significant (|Δ|>1): {(abs(pairs_df['Delta_pIC50']) > 1).sum()}"""
             
             ax.text(0.02, 0.98, stats_text, transform=ax.transAxes,
                    verticalalignment='top', fontsize=10,
@@ -586,33 +676,21 @@ Significant (|Δ|>1): {(abs(pairs_df['Delta']) > 1).sum()}"""
             with col1:
                 st.metric("Total Pairs", len(pairs_df))
             with col2:
-                st.metric("Unique Cores", pairs_df['Core'].nunique())
+                st.metric("Unique Cores", pairs_df['Core_SMILES'].nunique())
             with col3:
-                positive_pairs = (pairs_df['Delta'] > 0).sum()
+                positive_pairs = (pairs_df['Delta_pIC50'] > 0).sum()
                 st.metric("Positive Δ", f"{positive_pairs} ({100*positive_pairs/len(pairs_df):.1f}%)")
             with col4:
-                sig_pairs = (abs(pairs_df['Delta']) > 1).sum()
+                sig_pairs = (abs(pairs_df['Delta_pIC50']) > 1).sum()
                 st.metric("|Δ| > 1", f"{sig_pairs} ({100*sig_pairs/len(pairs_df):.1f}%)")
             
             # Show pair table
             st.subheader("Sample Pairs (First 20)")
-            display_cols = ['Name_1', 'pIC50_1', 'Name_2', 'pIC50_2', 'Delta', 'Core']
+            display_cols = ['Compound1_Name', 'Compound1_pIC50', 'Compound2_Name', 
+                          'Compound2_pIC50', 'Delta_pIC50', 'Transform']
             display_df = pairs_df[display_cols].head(20).copy()
-            display_df['Core'] = display_df['Core'].str[:50] + '...'  # Truncate long cores
+            display_df['Transform'] = display_df['Transform'].str[:50] + '...'  # Truncate
             st.dataframe(display_df)
-            
-            # Core size distribution
-            if 'Core' in pairs_df.columns:
-                st.subheader("Core Analysis")
-                core_stats = pairs_df['Core'].value_counts().head(10)
-                fig, ax = plt.subplots(figsize=(10, 4))
-                core_stats.plot(kind='bar', ax=ax, color='steelblue')
-                ax.set_xlabel('Core (truncated)')
-                ax.set_ylabel('Number of Pairs')
-                ax.set_title('Top 10 Most Frequent Cores')
-                plt.xticks(rotation=45, ha='right')
-                plt.tight_layout()
-                st.pyplot(fig)
         
         with tab3:
             if transforms_df is not None and len(transforms_df) > 0:
@@ -621,25 +699,32 @@ Significant (|Δ|>1): {(abs(pairs_df['Delta']) > 1).sum()}"""
                 
                 for idx, (_, row) in enumerate(transforms_df.head(top_n).iterrows()):
                     with st.container():
+                        st.markdown(f"### Transform #{idx+1}")
+                        
                         col1, col2 = st.columns([1, 2])
                         
                         with col1:
-                            # Simple transform display
-                            st.markdown(f"**Transform {idx+1}**")
+                            # Transform display
+                            st.markdown("**Chemical Transform:**")
                             st.code(row['Transform'], language='text')
                             
                             # Quick stats
                             st.metric("Occurrences", row['Count'])
-                            st.metric("Mean Δ", f"{row['Mean_ΔpIC50']:.2f}")
+                            st.metric("Mean ΔpIC50", f"{row['Mean_ΔpIC50']:.2f} ± {row['Std_ΔpIC50']:.2f}")
+                            st.metric("Range", f"[{row['Min_ΔpIC50']:.2f}, {row['Max_ΔpIC50']:.2f}]")
                         
                         with col2:
                             # Detailed statistics
-                            fig, ax = plt.subplots(figsize=(8, 2))
+                            fig, ax = plt.subplots(figsize=(8, 3))
                             
-                            # Strip plot
-                            y = np.random.normal(0, 0.1, len(row['Deltas']))
-                            ax.scatter(row['Deltas'], y, alpha=0.6, s=50)
-                            ax.axvline(row['Mean_ΔpIC50'], color='red', linestyle='--', label='Mean')
+                            # Box plot with individual points
+                            ax.boxplot(row['Deltas'], vert=False, widths=0.6)
+                            
+                            # Add individual points
+                            y = np.ones(len(row['Deltas'])) + np.random.normal(0, 0.02, len(row['Deltas']))
+                            ax.scatter(row['Deltas'], y, alpha=0.6, s=30, color='red')
+                            
+                            ax.axvline(row['Mean_ΔpIC50'], color='blue', linestyle='--', label=f'Mean: {row["Mean_ΔpIC50"]:.2f}')
                             ax.axvline(0, color='black', linestyle='-', alpha=0.3)
                             
                             ax.set_xlabel('ΔpIC50')
@@ -652,43 +737,144 @@ Significant (|Δ|>1): {(abs(pairs_df['Delta']) > 1).sum()}"""
                             st.pyplot(fig)
                             
                             # Example pair
-                            st.markdown(f"**Example:** {row['Example_Names']}")
+                            st.markdown(f"**Example Pair:** {row['Example_Names']}")
+                        
+                        # Visualize the transform if RDKit is available
+                        if show_fragment_images:
+                            try:
+                                # Create molecules for visualization
+                                rgroup1 = Chem.MolFromSmiles(row['Example_Rgroup_1'].replace('[*]', '[#0]'))
+                                rgroup2 = Chem.MolFromSmiles(row['Example_Rgroup_2'].replace('[*]', '[#0]'))
+                                core = Chem.MolFromSmiles(row['Common_Core'].replace('[*]', '[#0]'))
+                                
+                                if rgroup1 and rgroup2 and core:
+                                    # Highlight attachment points
+                                    for mol in [rgroup1, rgroup2, core]:
+                                        for atom in mol.GetAtoms():
+                                            if atom.GetAtomicNum() == 0:
+                                                atom.SetProp("atomNote", "*")
+                                    
+                                    img = Draw.MolsToGridImage(
+                                        [rgroup1, core, rgroup2],
+                                        molsPerRow=3,
+                                        subImgSize=(250, 200),
+                                        legends=["R-group 1", "Common Core", "R-group 2"]
+                                    )
+                                    st.image(img, caption="Transform Visualization", use_container_width=True)
+                            except:
+                                pass
                         
                         st.markdown("---")
             else:
                 st.info("No frequent transforms found. Try reducing the minimum occurrence threshold.")
+        
+        with tab4:
+            # Core analysis
+            st.subheader("Core Size Analysis")
+            
+            if 'Core_Atoms' in pairs_df.columns:
+                fig, ax = plt.subplots(figsize=(10, 4))
+                
+                # Histogram of core sizes
+                ax.hist(pairs_df['Core_Atoms'], bins=20, alpha=0.7, color='purple', edgecolor='black')
+                ax.set_xlabel('Core Atoms')
+                ax.set_ylabel('Number of Pairs')
+                ax.set_title('Distribution of Core Sizes')
+                ax.grid(True, alpha=0.3)
+                
+                plt.tight_layout()
+                st.pyplot(fig)
+                
+                # Top cores by frequency
+                st.subheader("Top 10 Most Frequent Cores")
+                core_stats = pairs_df['Core_SMILES'].value_counts().head(10)
+                
+                for idx, (core, count) in enumerate(core_stats.items()):
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.text(f"{idx+1}. {core[:80]}...")
+                    with col2:
+                        st.metric("Pairs", count)
+            
+            # Correlation analysis
+            st.subheader("Core Size vs ΔpIC50")
+            if 'Core_Atoms' in pairs_df.columns:
+                fig, ax = plt.subplots(figsize=(8, 4))
+                
+                ax.scatter(pairs_df['Core_Atoms'], pairs_df['Delta_pIC50'], 
+                          alpha=0.5, s=30)
+                ax.set_xlabel('Core Atoms')
+                ax.set_ylabel('ΔpIC50')
+                ax.set_title('Core Size vs Activity Change')
+                ax.grid(True, alpha=0.3)
+                
+                # Add trend line
+                z = np.polyfit(pairs_df['Core_Atoms'], pairs_df['Delta_pIC50'], 1)
+                p = np.poly1d(z)
+                x_range = np.linspace(pairs_df['Core_Atoms'].min(), pairs_df['Core_Atoms'].max(), 100)
+                ax.plot(x_range, p(x_range), "r--", alpha=0.8)
+                
+                plt.tight_layout()
+                st.pyplot(fig)
     
     def create_example_dataset():
-        """Create an example dataset for testing"""
+        """Create an example dataset for testing single-cut MMPA"""
+        # Example set with clear single-cut opportunities
         example_smiles = [
-            "CC(=O)OC1=CC=CC=C1C(=O)O",  # Aspirin
-            "CC(=O)OC1=CC=CC=C1C(=O)N",  # Aspirin-like with NH2
-            "CC(=O)OC1=CC=C(C=C1)C(=O)O",  # Ortho-substituted
-            "CC(=O)OC1=CC=CC=C1C(=O)OC",  # Methyl ester
-            "CC(=O)OC1=CC=CC=C1C(=O)NC",  # N-methyl amide
-            "CN1C=NC2=C1C(=O)N(C(=O)N2C)C",  # Caffeine
-            "CN1C=NC2=C1C(=O)N(C(=O)N2C)CC",  # Caffeine with ethyl
-            "CN1C=NC2=C1C(=O)N(C(=O)N2C)CCO",  # Caffeine with OH
-            "CC(C)CC1=CC=C(C=C1)C(C)C(=O)O",  # Ibuprofen
-            "CC(C)CC1=CC=C(C=C1)C(C)C(=O)OC",  # Ibuprofen methyl ester
-            "CC(C)CC1=CC=C(C=C1)C(C)C(=O)N",  # Ibuprofen amide
-            "C1=CC=C(C=C1)C=O",  # Benzaldehyde
-            "C1=CC=C(C=C1)C(=O)O",  # Benzoic acid
-            "C1=CC=C(C=C1)C(=O)N",  # Benzamide
-            "C1=CC=C(C=C1)C(=O)OC",  # Methyl benzoate
+            # Benzene derivatives - clear single cuts
+            "CC(=O)Oc1ccccc1C(=O)O",  # Aspirin-like
+            "CC(=O)Oc1ccccc1C(=O)N",  # Amide derivative
+            "CC(=O)Oc1ccccc1C(=O)OC",  # Methyl ester
+            "CNC(=O)Oc1ccccc1C(=O)O",  # N-methyl variant
+            
+            # Phenyl ring with various substituents
+            "Cc1ccccc1C(=O)O",  # Toluic acid
+            "Cc1ccccc1C(=O)N",  # Toluamide
+            "Cc1ccccc1C(=O)OC",  # Methyl toluate
+            "OCc1ccccc1C(=O)O",  # Hydroxy derivative
+            
+            # Biphenyl system
+            "O=C(O)c1ccccc1-c2ccccc2",  # Biphenyl-4-carboxylic acid
+            "O=C(N)c1ccccc1-c2ccccc2",  # Biphenyl-4-carboxamide
+            "O=C(OC)c1ccccc1-c2ccccc2",  # Methyl biphenyl-4-carboxylate
+            
+            # Simple aliphatic chains
+            "CCCCCC(=O)O",  # Heptanoic acid
+            "CCCCCC(=O)N",  # Heptanamide
+            "CCCCCC(=O)OC",  # Methyl heptanoate
+            
+            # Heterocyclic examples
+            "O=c1cccnc1O",  # Hydroxypyridine
+            "O=c1cccnc1N",  # Aminopyridine
+            "O=c1cccnc1OC",  # Methoxypyridine
         ]
         
         names = [f"Test_{i+1}" for i in range(len(example_smiles))]
-        # Create realistic pIC50 values with some structure-activity relationship
-        pIC50_values = []
-        base_values = [4.5, 5.0, 4.8, 4.3, 5.2,  # Aspirin series
-                      5.2, 5.5, 5.8, 6.1, 5.9,  # Caffeine series
-                      6.1, 5.8, 6.3, 3.8, 4.0]  # Other series
-        
-        # Add some noise
+        # Create realistic pIC50 values with SAR
         np.random.seed(42)
-        noise = np.random.normal(0, 0.3, len(example_smiles))
-        pIC50_values = base_values + noise
+        base_potency = 5.0
+        
+        # Add systematic effects for different groups
+        pIC50_values = []
+        for smi in example_smiles:
+            potency = base_potency
+            
+            # Acid groups generally better
+            if 'C(=O)O' in smi and not 'C(=O)OC' in smi:
+                potency += 0.5
+            
+            # Amides moderately good
+            if 'C(=O)N' in smi:
+                potency += 0.2
+            
+            # Esters generally worse
+            if 'C(=O)OC' in smi:
+                potency -= 0.3
+            
+            # Add some noise
+            potency += np.random.normal(0, 0.2)
+            
+            pIC50_values.append(max(4.0, min(8.0, potency)))
         
         example_df = pd.DataFrame({
             'SMILES': example_smiles,
@@ -708,21 +894,26 @@ else:
     if uploaded_file is None:
         # Welcome screen with option to use example data
         st.markdown("""
-        ## Welcome to the Advanced MMP Analysis Tool
+        ## Welcome to the Advanced MMP Analysis Tool (Single Cut)
         
-        This tool performs **Matched Molecular Pair (MMP)** analysis using multiple strategies:
+        This tool performs **Matched Molecular Pair (MMP)** analysis using **single cuts only** via RDKit's MMPA.
         
-        ### 🎯 **Available Strategies:**
+        ### 🎯 **Available Methods:**
         
-        1. **Core-based (Standard)** - Exact core matching
-        2. **Fragment-based (Comprehensive)** - All possible fragments
-        3. **Murcko Scaffold** - Bemis-Murcko scaffold grouping  
-        4. **All Pairs (Debug)** - Debug mode for troubleshooting
+        1. **Standard Single Cut** - Single non-ring bond cuts only
+        2. **Side-chain Only** - Only terminal bond cuts  
+        3. **Exhaustive Single Cut** - All single bond cuts including rings
+        
+        ### 🪓 **What are single cuts?**
+        - Cuts one bond to separate molecule into core + R-group
+        - Most chemically interpretable transforms
+        - Avoids complex fragmentation patterns
+        - Ideal for medicinal chemistry optimization
         
         ### 📊 **What you need:**
         - CSV file with SMILES strings
         - Optional: pIC50 values, compound names
-        - Minimum 10-20 compounds for meaningful analysis
+        - Minimum 10 compounds for meaningful analysis
         
         ### 🚀 **Quick Start:**
         """)
@@ -749,7 +940,7 @@ else:
             st.download_button(
                 label="📥 Download Example CSV",
                 data=example_df.to_csv(index=False),
-                file_name="example_mmp_data.csv",
+                file_name="example_mmp_single_cut.csv",
                 mime="text/csv"
             )
     
@@ -762,19 +953,20 @@ else:
             # Show dataset overview
             st.markdown('<h2 class="section-header">📊 Dataset Overview</h2>', unsafe_allow_html=True)
             
-            col1, col2, col3, col4 = st.columns(4)
+            col1, col2, col3, col4, col5 = st.columns(5)
             col1.metric("Compounds", len(df))
             col2.metric("Avg pIC50", f"{df['pIC50'].mean():.2f}")
             col3.metric("Avg MW", f"{df['MW'].mean():.1f}")
             col4.metric("Avg LogP", f"{df['LogP'].mean():.2f}")
+            col5.metric("Avg Rotatable", f"{df['RotatableBonds'].mean():.1f}")
             
             # Show property distributions
             with st.expander("View Molecular Properties"):
                 fig, axes = plt.subplots(2, 3, figsize=(12, 6))
                 
-                properties = ['pIC50', 'MW', 'LogP', 'HBA', 'HBD', 'TPSA']
+                properties = ['pIC50', 'MW', 'LogP', 'HBA', 'HBD', 'RotatableBonds']
                 titles = ['pIC50', 'Molecular Weight', 'LogP', 'H-Bond Acceptors', 
-                         'H-Bond Donors', 'TPSA']
+                         'H-Bond Donors', 'Rotatable Bonds']
                 
                 for idx, (prop, title, ax) in enumerate(zip(properties, titles, axes.flat)):
                     ax.hist(df[prop].dropna(), bins=20, alpha=0.7, color='steelblue', edgecolor='black')
@@ -786,20 +978,30 @@ else:
                 st.pyplot(fig)
                 
                 # Show data table
-                st.dataframe(df[['Name', 'SMILES', 'pIC50', 'MW', 'LogP']].head(10))
+                st.dataframe(df[['Name', 'SMILES', 'pIC50', 'MW', 'LogP', 'RotatableBonds']].head(10))
             
             # Perform MMP analysis
-            st.markdown('<h2 class="section-header">🔍 MMP Analysis</h2>', unsafe_allow_html=True)
+            st.markdown('<h2 class="section-header">🔍 Single-Cut MMP Analysis</h2>', unsafe_allow_html=True)
+            
+            # Method description
+            method_desc = {
+                "Standard Single Cut": "Single non-ring bond cuts only. Most chemically reasonable.",
+                "Side-chain Only": "Only cuts terminal bonds. Very conservative.",
+                "Exhaustive Single Cut": "All single bond cuts including rings. Most comprehensive."
+            }
+            
+            st.info(f"**Selected Method:** {mmpa_method}")
+            st.caption(method_desc[mmpa_method])
             
             # Analysis controls
             col1, col2 = st.columns([2, 1])
             
             with col1:
-                if st.button("🚀 Run MMP Analysis", type="primary"):
-                    with st.spinner("Running MMP analysis..."):
-                        pairs_df, transforms_df = perform_mmp_analysis_robust(
+                if st.button("🚀 Run Single-Cut MMP Analysis", type="primary"):
+                    with st.spinner("Running single-cut MMP analysis..."):
+                        pairs_df, transforms_df = perform_mmp_analysis_single_cut(
                             df, 
-                            pair_strategy,
+                            mmpa_method,
                             min_pairs_per_core,
                             show_detailed_debug
                         )
@@ -807,10 +1009,11 @@ else:
                         # Store results in session state
                         st.session_state.pairs_df = pairs_df
                         st.session_state.transforms_df = transforms_df
+                        st.session_state.analysis_method = mmpa_method
                         
                         # Show results if available
                         if pairs_df is not None:
-                            st.success(f"✅ Generated {len(pairs_df)} molecular pairs!")
+                            st.success(f"✅ Generated {len(pairs_df)} molecular pairs using {mmpa_method}!")
                             
                             # Display results
                             visualize_results(pairs_df, transforms_df)
@@ -827,7 +1030,7 @@ else:
                                         st.download_button(
                                             label="📥 Download Pairs (CSV)",
                                             data=csv_pairs,
-                                            file_name=f"mmp_pairs_{pair_strategy}.csv",
+                                            file_name=f"mmp_singlecut_pairs_{mmpa_method}.csv",
                                             mime="text/csv"
                                         )
                                 
@@ -837,7 +1040,7 @@ else:
                                         st.download_button(
                                             label="📥 Download Transforms (CSV)",
                                             data=csv_transforms,
-                                            file_name=f"mmp_transforms_{pair_strategy}.csv",
+                                            file_name=f"mmp_singlecut_transforms_{mmpa_method}.csv",
                                             mime="text/csv"
                                         )
                                 
@@ -847,42 +1050,40 @@ else:
                                     with pd.ExcelWriter(output, engine='openpyxl') as writer:
                                         df.to_excel(writer, sheet_name='Input_Data', index=False)
                                         if pairs_df is not None:
-                                            pairs_df.to_excel(writer, sheet_name='All_Pairs', index=False)
+                                            pairs_df.to_excel(writer, sheet_name='SingleCut_Pairs', index=False)
                                         if transforms_df is not None:
-                                            transforms_df.to_excel(writer, sheet_name='Transforms', index=False)
+                                            transforms_df.to_excel(writer, sheet_name='SingleCut_Transforms', index=False)
                                     
                                     st.download_button(
                                         label="📥 Download Full Analysis (Excel)",
                                         data=output.getvalue(),
-                                        file_name=f"mmp_analysis_{pair_strategy}.xlsx",
+                                        file_name=f"mmp_singlecut_analysis_{mmpa_method}.xlsx",
                                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                                     )
                         else:
                             st.error("❌ No molecular pairs were generated. Try the following:")
-                            st.markdown("""
+                            st.markdown(f"""
                             ### Troubleshooting Tips:
                             
-                            1. **Reduce minimum requirements** - Try lower values for:
+                            1. **Reduce minimum requirements**:
                                - Minimum compounds per core (currently {min_pairs_per_core})
                                - Minimum transform occurrences (currently {min_transform_occurrence})
                             
-                            2. **Try a different strategy**:
-                               - **Fragment-based** is most comprehensive
-                               - **Murcko Scaffold** works well for scaffold-hopping
-                               - **All Pairs (Debug)** shows what's being generated
+                            2. **Adjust fragment filters**:
+                               - Reduce minimum core atoms (currently {min_core_atoms})
+                               - Increase maximum R-group atoms (currently {max_rgroup_atoms})
                             
-                            3. **Check your data**:
-                               - Ensure pIC50 values have sufficient variation
-                               - Verify SMILES are valid (check error messages)
-                               - Try with more compounds (>20 recommended)
+                            3. **Try a different method**:
+                               - **Exhaustive Single Cut** is most likely to generate pairs
+                               - **Side-chain Only** works if you have terminal modifications
                             
-                            4. **Adjust fragmentation**:
-                               - Increase maximum bond cuts
-                               - Allow ring cuts (if chemically relevant)
+                            4. **Check your data**:
+                               - Ensure compounds share common scaffolds
+                               - Verify SMILES are valid
+                               - More compounds (>20) increase chances
                             
                             5. **Use the example dataset** to verify the tool works
-                            """.format(min_pairs_per_core=min_pairs_per_core, 
-                                      min_transform_occurrence=min_transform_occurrence))
+                            """)
             
             with col2:
                 if st.button("🔄 Reset Analysis"):
@@ -890,18 +1091,20 @@ else:
                         del st.session_state.pairs_df
                     if 'transforms_df' in st.session_state:
                         del st.session_state.transforms_df
+                    if 'analysis_method' in st.session_state:
+                        del st.session_state.analysis_method
                     st.rerun()
             
             # Show previously generated results if available
             if 'pairs_df' in st.session_state:
-                st.markdown("### 📋 Previously Generated Results")
+                st.markdown(f"### 📋 Previously Generated Results ({st.session_state.get('analysis_method', 'Unknown Method')})")
                 visualize_results(st.session_state.pairs_df, st.session_state.transforms_df)
 
 # Footer
 st.markdown("---")
 st.markdown("""
 <div style="text-align: center; color: #6B7280; font-size: 0.9rem;">
-    <p>Advanced MMP Analysis Tool v3.0 | Built with RDKit and Streamlit</p>
-    <p>For research use only | <a href="https://www.rdkit.org" target="_blank">RDKit Documentation</a></p>
+    <p>Advanced MMP Analysis Tool v3.0 (Single Cut) | Built with RDKit MMPA and Streamlit</p>
+    <p>For research use only | <a href="https://www.rdkit.org/docs/source/rdkit.Chem.rdMMPA.html" target="_blank">RDKit MMPA Documentation</a></p>
 </div>
 """, unsafe_allow_html=True)
