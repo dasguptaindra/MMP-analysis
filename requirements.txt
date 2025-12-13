@@ -1,10 +1,6 @@
 streamlit
 pandas
-rdkit
-seaborn
+numpy
 matplotlib
-requests>
-tqdm
-mols2grid
-useful-rdkit-utils
-
+seaborn
+rdkit
