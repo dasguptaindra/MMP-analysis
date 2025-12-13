@@ -350,12 +350,10 @@ if RDKIT_AVAILABLE:
             molecules = []
             valid_indices = []
             
-            for idx, row in df.iterrows():
-                try:
-                    mol = Chem.MolFromSmiles(row['SMILES'])
-                    if mol is not None:
-                        # Basic sanitization
-                        Chem.SanitizeMol(mol)
+            # Simplified version - no MW filtering at all
+            Chem.SanitizeMol(mol)
+            molecules.append(mol)
+            valid_indices.append(idx)
                         
                         # Check molecular weight
                         mw = Descriptors.MolWt(mol)
@@ -961,3 +959,4 @@ st.markdown("""
     <p>Based on proven RDKit workflow with FragmentMol(maxCuts=1) and proper fragment handling</p>
 </div>
 """, unsafe_allow_html=True)
+
