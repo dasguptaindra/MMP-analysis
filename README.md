@@ -1,133 +1,36 @@
-🧪 Matched Molecular Pair (MMP) Analysis Tool
+🧪 **Matched Molecular Pair (MMP) Analysis Tool**
 
-A Streamlit-based interactive application for performing Matched Molecular Pair (MMP) analysis to identify structural transformations that influence compound potency (pIC50).
-The tool is designed to faithfully reproduce classical MMP logic, with a strong emphasis on statistical robustness, interpretability, and medicinal chemistry relevance.
+**A Streamlit-based interactive application for performing Matched Molecular Pair (MMP) analysis to identify structural transformations that influence compound potency (pIC50).
+The tool is designed to faithfully reproduce classical MMP logic, with a strong emphasis on statistical robustness, interpretability, and medicinal chemistry relevance.**
 
-📌 Key Features
+Explore matched molecular pair (MMP) analysis interactively using our Streamlit-based web tool.
 
-🔬 MMP logic implementation
+👉 **Launch the App**  
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://mmp-analysis-vvper6mar624h8dkxby5pf.streamlit.app/)
 
-Pairs generated only when ≥3 compounds share the same core
+🌐 https://mmp-analysis-vvper6mar624h8dkxby5pf.streamlit.app/
 
-Canonical SMILES-based ordering for reproducibility
+⚠️ **Limitations**
 
-🧩 Automated molecular fragmentation
+**Single-cut fragmentation only**
 
-Single-cut fragmentation strategy
+**No stereochemistry handling**
 
-Core–R-group decomposition
+**Activity assumed comparable across assays**
 
-📈 Transform effect analysis
+**Not suitable for covalent or metal-binding ligands (without modification)**
 
-ΔpIC50 calculation for each matched pair
+📚 **References**
 
-Mean ΔpIC50 and distribution per transformation
+1. **Hussain, J. & Rea, C. (2010). Computationally efficient algorithm to identify matched molecular pairs (MMPs) in large data sets. *Journal of Chemical Information and Modeling*, 50(3), 339-348.** https://doi.org/10.1021/ci900450m
+2. **Dossetter, A. G., Griffen, E. J., & Leach, A. G. (2013). Matched molecular pair analysis in drug discovery. *Drug Discovery Today*, 18(15-16), 724-731**. https://doi.org/10.1016/j.drudis.2013.03.003
+3. **Wassermann, A. M., Dimova, D., Iyer, P., & Bajorath, J., Advances in computational medicinal chemistry: matched molecular pair analysis. Drug Development Research, 73 (2012): 518-527.** https://doi.org/10.1002/ddr.21045
+4. **Tyrchan, Christian, and Emma Evertsson. "Matched molecular pair analysis in short: algorithms, applications and limitations," Computational and Structural Biotechnology Journal 15 (2017): 86-90** https://doi.org/10.1016/j.csbj.2016.12.003
 
-🧠 Medicinal chemistry interpretability
+📜 **License**
+**For academic and research use only.**
 
-Reaction SMARTS visualization
+👨‍🔬 **Author Notes**
 
-Positive and negative transformation ranking
+**Designed for computational medicinal chemists, QSAR researchers, and drug discovery scientists.**
 
-🖼 Structure visualization
-
-Reaction schemes
-
-Compound examples (before/after)
-
-📊 Interactive analytics
-
-Strip plots for ΔpIC50 distributions
-
-Expandable tables and molecule grids
-
-💾 Export options
-
-CSV and Excel outputs for downstream analysis
-
-🧬 Scientific Background
-
-Matched Molecular Pair Analysis (MMPA) is a ligand-based technique used in medicinal chemistry to identify the impact of small, well-defined chemical changes on biological activity.
-
-This implementation follows the principles described in:
-
-Hussain & Rea, J. Chem. Inf. Model., 2010
-
-Dossetter et al., Drug Discovery Today, 2013
-
-Tyrchan & Evertsson, CSBJ, 2017
-
-📂 Input File Requirements
-
-Upload a CSV file with the following columns:
-
-Column	Required	Description
-SMILES	✅	Molecular structure in SMILES format
-pIC50	✅	Potency value (–log₁₀ IC50)
-Name		Compound identifier (recommended)
-Example CSV
-SMILES,Name,pIC50
-CCOc1ccc(C(=O)N2CCNCC2)cc1,Compound_1,6.3
-CCOc1ccc(C(=O)N3CCC(CC3)O)cc1,Compound_2,7.1
-CCOc1ccc(C(=O)N4CCOCC4)cc1,Compound_3,5.8
-
-⚙️ Application Workflow
-
-Upload dataset
-
-Molecule preprocessing
-
-Optional sanitization
-
-Optional kekulization
-
-Fragmentation
-
-Single-bond cuts
-
-Largest fragment retained as core
-
-Pair generation
-
-Same core, different R-groups
-
-ΔpIC50 calculation
-
-Transform frequency filtering
-
-Visualization & export
-
-⚠️ Limitations
-
-Single-cut fragmentation only
-
-No stereochemistry handling
-
-Activity assumed comparable across assays
-
-Not suitable for covalent or metal-binding ligands (without modification)
-
-📚 References
-
-Hussain, J., Rea, C. J. Chem. Inf. Model., 2010
-
-Dossetter, A. G., et al. Drug Discovery Today, 2013
-
-Wassermann, A. M., et al. Drug Dev. Res., 2012
-
-Tyrchan, C., Evertsson, E. CSBJ, 2017
-
-📜 License
-
-For academic and research use only.
-Please validate all computational insights with experimental data.
-
-👨‍🔬 Author Notes
-
-Designed for computational medicinal chemists, QSAR researchers, and drug discovery scientists who require:
-
-Transparent MMP logic
-
-Reproducible results
-
-Interpretable chemical insights
