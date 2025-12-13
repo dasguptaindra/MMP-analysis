@@ -1065,7 +1065,7 @@ elif uploaded_file is not None:
 else:
     # Show welcome message when no file is uploaded
     st.markdown("""
-    ## Welcome to the MMP Analysis Tool! 👋
+    ## Welcome to the MMP Analysis Tool! 
     
     This tool performs **Matched Molecular Pair (MMP) analysis** to identify structural transformations that affect compound potency.
     
@@ -1125,3 +1125,4 @@ st.markdown("""
     <p>For research use only. Always validate computational predictions with experimental data.</p>
 </div>
 """, unsafe_allow_html=True)
+
