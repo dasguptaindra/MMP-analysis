@@ -1081,26 +1081,6 @@ else:
     - `pIC50`: Potency values (negative log of IC50)
     - `Name`: Compound names (optional but recommended)
     
-    ### Example CSV format:
-    ```csv
-    SMILES,Name,pIC50
-    CC(=O)OC1=CC=CC=C1C(=O)O,aspirin,5.0
-    CN1C=NC2=C1C(=O)N(C(=O)N2C)C,caffeine,4.2
-    C1=CC=C(C=C1)C=O,benzaldehyde,3.8
-    ...
-    ```
-    
-    ### Key Logic:
-    - **Pairs are generated only when 3+ compounds share the same core**
-    - This reduces noise and focuses on statistically significant transformations
-    - **Exact fragment display**: Shows R-groups without added hydrogens
-    
-    ### Troubleshooting:
-    If you encounter errors:
-    1. **NumPy compatibility**: Install `numpy<2` with `pip install "numpy<2"`
-    2. **Invalid SMILES**: Check your SMILES strings are valid
-    3. **Kekulization errors**: Disable "Kekulize molecules" in sidebar
-    
     ### References:
     - Hussain, J. & Rea, C. (2010). Computationally efficient algorithm to identify matched molecular pairs (MMPs) in large data sets. *Journal of Chemical Information and Modeling*, 50(3), 339-348. https://doi.org/10.1021/ci900450m
     - Dossetter, A. G., Griffen, E. J., & Leach, A. G. (2013). Matched molecular pair analysis in drug discovery. *Drug Discovery Today*, 18(15-16), 724-731. https://doi.org/10.1016/j.drudis.2013.03.003
@@ -1120,6 +1100,7 @@ st.markdown("""
     <p>For research use only. Always validate computational predictions with experimental data.</p>
 </div>
 """, unsafe_allow_html=True)
+
 
 
 
