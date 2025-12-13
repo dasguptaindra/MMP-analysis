@@ -60,47 +60,10 @@ if not RDKIT_AVAILABLE:
     """)
     st.stop()
 
-# Sidebar for file upload and parameters
-st.sidebar.header("📁 Data Input")
+# ============================================================================
+# FUNCTION DEFINITIONS
+# ============================================================================
 
-uploaded_file = st.sidebar.file_uploader(
-    "Upload your CSV file with columns: SMILES, Name, pIC50",
-    type=['csv']
-)
-
-# Example data in sidebar
-st.sidebar.markdown("### 📋 Expected CSV Format")
-st.sidebar.code("""SMILES,Name,pIC50
-Cc1ccc(cc1)C(=O)O,Compound1,7.2
-COc1ccc(cc1)C(=O)O,Compound2,7.8
-CFc1ccc(cc1)C(=O)O,Compound3,6.9
-...""")
-
-# Parameters in sidebar
-st.sidebar.header("⚙️ Parameters")
-min_transform_occurrence = st.sidebar.slider(
-    "Minimum transform occurrences",
-    min_value=1,
-    max_value=20,
-    value=2,
-    help="Only consider transformations that occur at least this many times"
-)
-
-num_top_transforms = st.sidebar.slider(
-    "Number of top transforms to display",
-    min_value=3,
-    max_value=10,
-    value=3
-)
-
-# Visualization parameters
-st.sidebar.header("🎨 Visualization Settings")
-show_smiles = st.sidebar.checkbox("Show SMILES", value=True, help="Display SMILES strings")
-show_molecules = st.sidebar.checkbox("Show molecule images", value=True, help="Display molecule structures")
-highlight_common_core = st.sidebar.checkbox("Highlight common core", value=True, help="Color-code the common scaffold")
-image_size = st.sidebar.slider("Molecule image size", 200, 400, 300, help="Size of molecule images")
-
-# Function definitions
 def remove_map_nums(mol):
     """Remove atom map numbers from a molecule"""
     for atm in mol.GetAtoms():
@@ -118,150 +81,6 @@ def sort_fragments(mol):
     frag_num_atoms_list.sort(key=itemgetter(0), reverse=True)
     return [x[1] for x in frag_num_atoms_list]
 
-# NEW: Function to highlight common cores in molecules
-def highlight_common_scaffold(mol1, mol2, highlight_color=(0.8, 0.8, 0.8, 0.6)):
-    """Highlight the common scaffold between two molecules"""
-    try:
-        # Find maximum common substructure
-        from rdkit.Chem import rdFMCS
-        mcs_result = rdFMCS.FindMCS([mol1, mol2], timeout=60)
-        
-        if mcs_result.numAtoms > 0:
-            mcs_smarts = mcs_result.smartsString
-            pattern = Chem.MolFromSmarts(mcs_smarts)
-            
-            if pattern:
-                # Highlight matching atoms in mol1
-                matches1 = mol1.GetSubstructMatches(pattern)
-                matches2 = mol2.GetSubstructMatches(pattern)
-                
-                if matches1 and matches2:
-                    highlight_atoms1 = list(matches1[0])
-                    highlight_atoms2 = list(matches2[0])
-                    
-                    return highlight_atoms1, highlight_atoms2
-    except:
-        pass
-    return [], []
-
-# NEW: Improved molecule visualization with highlighting
-def draw_molecule_pair(mol1, mol2, name1="Compound 1", name2="Compound 2", 
-                      pIC50_1=None, pIC50_2=None, highlight_core=True, size=(300, 300)):
-    """Draw two molecules side by side with highlighting"""
-    from rdkit.Chem.Draw import MolsToGridImage
-    
-    # Prepare molecules for display
-    mols = [mol1, mol2]
-    
-    # Highlight common core if requested
-    highlight_atoms = []
-    highlight_bonds = []
-    
-    if highlight_core and mol1 and mol2:
-        atoms1, atoms2 = highlight_common_scaffold(mol1, mol2)
-        
-        # Create highlight colors
-        colors1 = [(0.8, 0.8, 0.8, 0.6)] * len(atoms1) if atoms1 else []
-        colors2 = [(0.8, 0.8, 0.8, 0.6)] * len(atoms2) if atoms2 else []
-        
-        highlight_atoms = [atoms1, atoms2]
-    
-    # Create labels
-    labels = []
-    for i, (mol, pIC50) in enumerate(zip([mol1, mol2], [pIC50_1, pIC50_2])):
-        label_parts = [f"Compound {i+1}"]
-        if pIC50 is not None:
-            label_parts.append(f"pIC50: {pIC50:.2f}")
-        labels.append("\n".join(label_parts))
-    
-    # Draw molecules
-    try:
-        img = MolsToGridImage(mols, molsPerRow=2, subImgSize=size,
-                             legends=labels,
-                             highlightAtomLists=highlight_atoms if highlight_atoms else None,
-                             highlightBondLists=highlight_bonds if highlight_bonds else None)
-        return img
-    except:
-        # Fallback to simple drawing
-        img = MolsToGridImage(mols, molsPerRow=2, subImgSize=size, legends=labels)
-        return img
-
-# NEW: Enhanced transformation visualization
-def visualize_transformation_enhanced(transform_str, compounds_df=None, 
-                                     example_compounds=None, size=(400, 200)):
-    """Create an enhanced visualization of the transformation"""
-    try:
-        if '>>' in transform_str:
-            reactant_str, product_str = transform_str.split('>>')
-            
-            # Create a reaction visualization
-            rxn_smarts = f"[*:1]{reactant_str}>>[*:1]{product_str}"
-            
-            try:
-                rxn = AllChem.ReactionFromSmarts(rxn_smarts)
-                
-                # Create a more detailed image
-                drawer = rdMolDraw2D.MolDraw2DCairo(size[0], size[1])
-                drawer.DrawReaction(rxn)
-                drawer.FinishDrawing()
-                
-                # Get PNG data
-                png_data = drawer.GetDrawingText()
-                
-                # Convert to PIL Image
-                img = Image.open(io.BytesIO(png_data))
-                return img
-                
-            except:
-                # Fallback: Show reactants and products separately
-                from rdkit.Chem.Draw import MolsToGridImage
-                
-                # Create placeholder molecules
-                reactant_mol = Chem.MolFromSmiles(f"[*]{reactant_str}")
-                product_mol = Chem.MolFromSmiles(f"[*]{product_str}")
-                
-                if reactant_mol and product_mol:
-                    mols = [reactant_mol, product_mol]
-                    img = MolsToGridImage(mols, molsPerRow=2, 
-                                         subImgSize=(size[0]//2, size[1]),
-                                         legends=["Reactant", "Product"])
-                    return img
-                else:
-                    # Create text-based visualization
-                    return create_text_visualization(transform_str, size)
-        else:
-            return create_text_visualization(transform_str, size)
-            
-    except Exception as e:
-        return create_text_visualization(f"Error: {str(e)[:50]}", size)
-
-def create_text_visualization(text, size):
-    """Create a text-based visualization as fallback"""
-    from PIL import Image, ImageDraw, ImageFont
-    img = Image.new('RGB', size, color='white')
-    draw = ImageDraw.Draw(img)
-    
-    # Try to load font
-    try:
-        font = ImageFont.truetype("arial.ttf", 12)
-    except:
-        font = ImageFont.load_default()
-    
-    # Split text if too long
-    if len(text) > 40:
-        lines = [text[i:i+40] for i in range(0, len(text), 40)]
-    else:
-        lines = [text]
-    
-    # Draw lines
-    y_offset = 10
-    for line in lines:
-        draw.text((10, y_offset), line, fill='black', font=font)
-        y_offset += 20
-    
-    return img
-
-# ORIGINAL FRAGMENTATION FUNCTIONS (Must be included)
 def get_mmp_fragments_simple(mol):
     """Simple fragmentation method using common attachment points"""
     fragments = []
@@ -527,7 +346,230 @@ def get_largest_fragment(mol):
     except:
         return mol
 
-# NEW: Function to display transformation with examples
+def highlight_common_scaffold(mol1, mol2, highlight_color=(0.8, 0.8, 0.8, 0.6)):
+    """Highlight the common scaffold between two molecules"""
+    try:
+        # Find maximum common substructure
+        from rdkit.Chem import rdFMCS
+        mcs_result = rdFMCS.FindMCS([mol1, mol2], timeout=60)
+        
+        if mcs_result.numAtoms > 0:
+            mcs_smarts = mcs_result.smartsString
+            pattern = Chem.MolFromSmarts(mcs_smarts)
+            
+            if pattern:
+                # Highlight matching atoms in mol1
+                matches1 = mol1.GetSubstructMatches(pattern)
+                matches2 = mol2.GetSubstructMatches(pattern)
+                
+                if matches1 and matches2:
+                    highlight_atoms1 = list(matches1[0])
+                    highlight_atoms2 = list(matches2[0])
+                    
+                    return highlight_atoms1, highlight_atoms2
+    except:
+        pass
+    return [], []
+
+def draw_molecule_pair(mol1, mol2, name1="Compound 1", name2="Compound 2", 
+                      pIC50_1=None, pIC50_2=None, highlight_core=True, size=(300, 300)):
+    """Draw two molecules side by side with highlighting"""
+    from rdkit.Chem.Draw import MolsToGridImage
+    
+    # Prepare molecules for display
+    mols = [mol1, mol2]
+    
+    # Highlight common core if requested
+    highlight_atoms = []
+    highlight_bonds = []
+    
+    if highlight_core and mol1 and mol2:
+        atoms1, atoms2 = highlight_common_scaffold(mol1, mol2)
+        
+        # Create highlight colors
+        colors1 = [(0.8, 0.8, 0.8, 0.6)] * len(atoms1) if atoms1 else []
+        colors2 = [(0.8, 0.8, 0.8, 0.6)] * len(atoms2) if atoms2 else []
+        
+        highlight_atoms = [atoms1, atoms2]
+    
+    # Create labels
+    labels = []
+    for i, (mol, pIC50) in enumerate(zip([mol1, mol2], [pIC50_1, pIC50_2])):
+        label_parts = [f"Compound {i+1}"]
+        if pIC50 is not None:
+            label_parts.append(f"pIC50: {pIC50:.2f}")
+        labels.append("\n".join(label_parts))
+    
+    # Draw molecules
+    try:
+        img = MolsToGridImage(mols, molsPerRow=2, subImgSize=size,
+                             legends=labels,
+                             highlightAtomLists=highlight_atoms if highlight_atoms else None,
+                             highlightBondLists=highlight_bonds if highlight_bonds else None)
+        return img
+    except:
+        # Fallback to simple drawing
+        img = MolsToGridImage(mols, molsPerRow=2, subImgSize=size, legends=labels)
+        return img
+
+def create_text_visualization(text, size):
+    """Create a text-based visualization as fallback"""
+    from PIL import Image, ImageDraw, ImageFont
+    img = Image.new('RGB', size, color='white')
+    draw = ImageDraw.Draw(img)
+    
+    # Try to load font
+    try:
+        font = ImageFont.truetype("arial.ttf", 12)
+    except:
+        font = ImageFont.load_default()
+    
+    # Split text if too long
+    if len(text) > 40:
+        lines = [text[i:i+40] for i in range(0, len(text), 40)]
+    else:
+        lines = [text]
+    
+    # Draw lines
+    y_offset = 10
+    for line in lines:
+        draw.text((10, y_offset), line, fill='black', font=font)
+        y_offset += 20
+    
+    return img
+
+def visualize_transformation_enhanced(transform_str, compounds_df=None, 
+                                     example_compounds=None, size=(400, 200)):
+    """Create an enhanced visualization of the transformation"""
+    try:
+        if '>>' in transform_str:
+            reactant_str, product_str = transform_str.split('>>')
+            
+            # Create a reaction visualization
+            rxn_smarts = f"[*:1]{reactant_str}>>[*:1]{product_str}"
+            
+            try:
+                rxn = AllChem.ReactionFromSmarts(rxn_smarts)
+                
+                # Create a more detailed image
+                drawer = rdMolDraw2D.MolDraw2DCairo(size[0], size[1])
+                drawer.DrawReaction(rxn)
+                drawer.FinishDrawing()
+                
+                # Get PNG data
+                png_data = drawer.GetDrawingText()
+                
+                # Convert to PIL Image
+                img = Image.open(io.BytesIO(png_data))
+                return img
+                
+            except:
+                # Fallback: Show reactants and products separately
+                from rdkit.Chem.Draw import MolsToGridImage
+                
+                # Create placeholder molecules
+                reactant_mol = Chem.MolFromSmiles(f"[*]{reactant_str}")
+                product_mol = Chem.MolFromSmiles(f"[*]{product_str}")
+                
+                if reactant_mol and product_mol:
+                    mols = [reactant_mol, product_mol]
+                    img = MolsToGridImage(mols, molsPerRow=2, 
+                                         subImgSize=(size[0]//2, size[1]),
+                                         legends=["Reactant", "Product"])
+                    return img
+                else:
+                    # Create text-based visualization
+                    return create_text_visualization(transform_str, size)
+        else:
+            return create_text_visualization(transform_str, size)
+            
+    except Exception as e:
+        return create_text_visualization(f"Error: {str(e)[:50]}", size)
+
+def rxn_to_image(rxn_smarts, width=300, height=150):
+    """Convert reaction SMARTS to PIL Image"""
+    try:
+        return visualize_transformation_enhanced(rxn_smarts, size=(width, height))
+    except:
+        # Fallback
+        from PIL import Image, ImageDraw
+        img = Image.new('RGB', (width, height), color='white')
+        draw = ImageDraw.Draw(img)
+        draw.text((10, height//2 - 10), str(rxn_smarts)[:50], fill='black')
+        return img
+
+def mol_to_image(mol, width=200, height=200):
+    """Convert RDKit molecule to PIL Image"""
+    try:
+        img = Draw.MolToImage(mol, size=(width, height))
+        return img
+    except:
+        # Create a placeholder image
+        img = Image.new('RGB', (width, height), color='white')
+        return img
+
+def create_stripplot(deltas, figsize=(4, 1.5)):
+    """Create a stripplot for delta distribution"""
+    fig, ax = plt.subplots(figsize=figsize)
+    try:
+        if len(deltas) > 0:
+            sns.stripplot(x=deltas, ax=ax, jitter=0.3, alpha=0.7, s=8, color='steelblue')
+        ax.axvline(0, ls="--", c="red", alpha=0.7)
+        
+        # Set appropriate xlim based on data
+        if len(deltas) > 0:
+            x_range = max(abs(min(deltas)), abs(max(deltas))) * 1.1
+            ax.set_xlim(-x_range, x_range)
+        else:
+            ax.set_xlim(-5, 5)
+            
+        ax.set_xlabel("ΔpIC50")
+        ax.set_ylabel("")
+        ax.set_yticks([])
+        plt.tight_layout()
+    except Exception as e:
+        ax.text(0.5, 0.5, "Error creating plot", ha='center', va='center')
+    return fig
+
+def display_compound_grid(compounds_df, smiles_col="SMILES", id_col="Name", value_col="pIC50"):
+    """Display compounds in a grid format"""
+    n_cols = 4
+    n_rows = (len(compounds_df) + n_cols - 1) // n_cols
+    
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4*n_cols, 3*n_rows))
+    if n_rows == 1:
+        axes = [axes]
+    if n_cols == 1:
+        axes = [[ax] for ax in axes]
+    
+    for idx, (_, row) in enumerate(compounds_df.iterrows()):
+        row_idx = idx // n_cols
+        col_idx = idx % n_cols
+        
+        try:
+            mol = Chem.MolFromSmiles(row[smiles_col])
+            if mol:
+                img = Draw.MolToImage(mol, size=(250, 250))
+                axes[row_idx][col_idx].imshow(img)
+                title = f"{row[id_col]}\n{value_col}: {row[value_col]:.2f}"
+                axes[row_idx][col_idx].set_title(title, fontsize=9)
+            else:
+                axes[row_idx][col_idx].text(0.5, 0.5, "Invalid SMILES", 
+                                           ha='center', va='center')
+        except:
+            axes[row_idx][col_idx].text(0.5, 0.5, "Error", ha='center', va='center')
+        
+        axes[row_idx][col_idx].axis('off')
+    
+    # Hide empty subplots
+    for idx in range(len(compounds_df), n_rows * n_cols):
+        row_idx = idx // n_cols
+        col_idx = idx % n_cols
+        axes[row_idx][col_idx].axis('off')
+    
+    plt.tight_layout()
+    return fig
+
 def display_transformation_with_examples(transform_str, delta_df, compounds_df, 
                                         transform_idx, highlight_core=True):
     """Display a transformation with example compound pairs"""
@@ -677,93 +719,6 @@ def display_transformation_with_examples(transform_str, delta_df, compounds_df,
     
     return example_pairs
 
-# Modified rxn_to_image function to use enhanced visualization
-def rxn_to_image(rxn_smarts, width=300, height=150):
-    """Convert reaction SMARTS to PIL Image"""
-    try:
-        return visualize_transformation_enhanced(rxn_smarts, size=(width, height))
-    except:
-        # Fallback
-        from PIL import Image, ImageDraw
-        img = Image.new('RGB', (width, height), color='white')
-        draw = ImageDraw.Draw(img)
-        draw.text((10, height//2 - 10), str(rxn_smarts)[:50], fill='black')
-        return img
-
-# Plotting functions
-def mol_to_image(mol, width=200, height=200):
-    """Convert RDKit molecule to PIL Image"""
-    try:
-        img = Draw.MolToImage(mol, size=(width, height))
-        return img
-    except:
-        # Create a placeholder image
-        img = Image.new('RGB', (width, height), color='white')
-        return img
-
-def create_stripplot(deltas, figsize=(4, 1.5)):
-    """Create a stripplot for delta distribution"""
-    fig, ax = plt.subplots(figsize=figsize)
-    try:
-        if len(deltas) > 0:
-            sns.stripplot(x=deltas, ax=ax, jitter=0.3, alpha=0.7, s=8, color='steelblue')
-        ax.axvline(0, ls="--", c="red", alpha=0.7)
-        
-        # Set appropriate xlim based on data
-        if len(deltas) > 0:
-            x_range = max(abs(min(deltas)), abs(max(deltas))) * 1.1
-            ax.set_xlim(-x_range, x_range)
-        else:
-            ax.set_xlim(-5, 5)
-            
-        ax.set_xlabel("ΔpIC50")
-        ax.set_ylabel("")
-        ax.set_yticks([])
-        plt.tight_layout()
-    except Exception as e:
-        ax.text(0.5, 0.5, "Error creating plot", ha='center', va='center')
-    return fig
-
-def display_compound_grid(compounds_df, smiles_col="SMILES", id_col="Name", value_col="pIC50"):
-    """Display compounds in a grid format"""
-    n_cols = 4
-    n_rows = (len(compounds_df) + n_cols - 1) // n_cols
-    
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4*n_cols, 3*n_rows))
-    if n_rows == 1:
-        axes = [axes]
-    if n_cols == 1:
-        axes = [[ax] for ax in axes]
-    
-    for idx, (_, row) in enumerate(compounds_df.iterrows()):
-        row_idx = idx // n_cols
-        col_idx = idx % n_cols
-        
-        try:
-            mol = Chem.MolFromSmiles(row[smiles_col])
-            if mol:
-                img = Draw.MolToImage(mol, size=(250, 250))
-                axes[row_idx][col_idx].imshow(img)
-                title = f"{row[id_col]}\n{value_col}: {row[value_col]:.2f}"
-                axes[row_idx][col_idx].set_title(title, fontsize=9)
-            else:
-                axes[row_idx][col_idx].text(0.5, 0.5, "Invalid SMILES", 
-                                           ha='center', va='center')
-        except:
-            axes[row_idx][col_idx].text(0.5, 0.5, "Error", ha='center', va='center')
-        
-        axes[row_idx][col_idx].axis('off')
-    
-    # Hide empty subplots
-    for idx in range(len(compounds_df), n_rows * n_cols):
-        row_idx = idx // n_cols
-        col_idx = idx % n_cols
-        axes[row_idx][col_idx].axis('off')
-    
-    plt.tight_layout()
-    return fig
-
-# Modified analysis function to use enhanced display
 def run_mmp_analysis(df, min_occurrences=2):
     """Main MMP analysis pipeline"""
     
@@ -930,7 +885,54 @@ def run_mmp_analysis(df, min_occurrences=2):
     
     return valid_df, row_df, delta_df, mmp_df
 
-# Main app logic
+# ============================================================================
+# SIDEBAR CONFIGURATION
+# ============================================================================
+
+# Sidebar for file upload and parameters
+st.sidebar.header("📁 Data Input")
+
+uploaded_file = st.sidebar.file_uploader(
+    "Upload your CSV file with columns: SMILES, Name, pIC50",
+    type=['csv']
+)
+
+# Example data in sidebar
+st.sidebar.markdown("### 📋 Expected CSV Format")
+st.sidebar.code("""SMILES,Name,pIC50
+Cc1ccc(cc1)C(=O)O,Compound1,7.2
+COc1ccc(cc1)C(=O)O,Compound2,7.8
+CFc1ccc(cc1)C(=O)O,Compound3,6.9
+...""")
+
+# Parameters in sidebar
+st.sidebar.header("⚙️ Parameters")
+min_transform_occurrence = st.sidebar.slider(
+    "Minimum transform occurrences",
+    min_value=1,
+    max_value=20,
+    value=2,
+    help="Only consider transformations that occur at least this many times"
+)
+
+num_top_transforms = st.sidebar.slider(
+    "Number of top transforms to display",
+    min_value=3,
+    max_value=10,
+    value=3
+)
+
+# Visualization parameters
+st.sidebar.header("🎨 Visualization Settings")
+show_smiles = st.sidebar.checkbox("Show SMILES", value=True, help="Display SMILES strings")
+show_molecules = st.sidebar.checkbox("Show molecule images", value=True, help="Display molecule structures")
+highlight_common_core = st.sidebar.checkbox("Highlight common core", value=True, help="Color-code the common scaffold")
+image_size = st.sidebar.slider("Molecule image size", 200, 400, 300, help="Size of molecule images")
+
+# ============================================================================
+# MAIN APP LOGIC
+# ============================================================================
+
 if uploaded_file is not None:
     try:
         # Load data
