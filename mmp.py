@@ -60,6 +60,13 @@ st.markdown("""
         border-radius: 5px;
         margin: 1rem 0;
     }
+    .cut-level {
+        background-color: #E0F2FE;
+        border-radius: 5px;
+        padding: 0.5rem;
+        margin: 0.5rem 0;
+        border-left: 3px solid #0EA5E9;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -71,6 +78,7 @@ try:
     from rdkit import Chem
     from rdkit.Chem import AllChem, Draw
     from rdkit.Chem.Draw import rdMolDraw2D
+    from rdkit.Chem.rdmolops import ReplaceCore
     RDKIT_AVAILABLE = True
 except ImportError as e:
     st.error(f"RDKit not available: {e}")
@@ -100,8 +108,29 @@ with st.sidebar:
     if uploaded_file and RDKIT_AVAILABLE:
         # Parameters
         st.markdown("### ⚙️ Parameters")
-        min_occurrence = st.slider("Minimum transform occurrences", 1, 20, 5, 
+        min_occurrence = st.slider("Minimum transform occurrences", 1, 50, 3, 
                                   help="Minimum number of occurrences for a transform to be considered")
+        
+        # Multi-cut fragmentation options
+        st.markdown("### ✂️ Fragmentation Options")
+        max_cuts = st.slider("Maximum number of cuts per molecule", 1, 5, 2,
+                            help="Maximum number of bonds to cut during fragmentation")
+        min_fragment_size = st.slider("Minimum fragment size (atoms)", 1, 20, 5,
+                                     help="Minimum number of atoms in a fragment to consider")
+        max_fragment_size = st.slider("Maximum fragment size (atoms)", 5, 100, 50,
+                                     help="Maximum number of atoms in a fragment to consider")
+        
+        # Advanced fragmentation options
+        with st.expander("Advanced Fragmentation Settings"):
+            fragment_single_bonds_only = st.checkbox("Cut single bonds only", value=True,
+                                                    help="Only cut single bonds during fragmentation")
+            exclude_rings_from_cuts = st.checkbox("Exclude ring bonds", value=True,
+                                                 help="Don't cut bonds that are part of rings")
+            keep_largest_core_only = st.checkbox("Keep largest core only", value=False,
+                                                help="Only keep the largest fragment as core")
+            symmetric_cut_handling = st.selectbox("Symmetric cut handling", 
+                                                 ["Keep all", "Remove duplicates", "Keep unique cores"],
+                                                 index=0)
         
         # Molecule cleaning options
         st.markdown("### 🧹 Molecule Cleaning")
@@ -113,7 +142,7 @@ with st.sidebar:
         # Display options
         st.markdown("### 👀 Display Options")
         show_all_transforms = st.checkbox("Show all transformations", value=False)
-        transforms_to_display = st.slider("Number of transforms to display", 1, 50, 10, 
+        transforms_to_display = st.slider("Number of transforms to display", 1, 100, 20, 
                                          disabled=show_all_transforms)
         
         # Analysis options
@@ -121,6 +150,7 @@ with st.sidebar:
         show_top_positive = st.checkbox("Show top positive transforms", value=True)
         show_top_negative = st.checkbox("Show top negative transforms", value=True)
         show_compound_examples = st.checkbox("Show compound examples", value=True)
+        show_cut_level_analysis = st.checkbox("Show cut-level analysis", value=True)
         
         # Pair generation logic
         st.markdown("### 🔗 Pair Generation Logic")
@@ -137,18 +167,6 @@ with st.sidebar:
         # Save options
         st.markdown("### 💾 Export")
         save_results = st.checkbox("Save results to Excel")
-    
-    # About section
-    with st.expander("About MMP Analysis"):
-        st.markdown("""
-        **Matched Molecular Pairs (MMP)** is a technique for identifying structural transformations that affect biological activity.
-        
-        **Key steps:**
-        1. Decompose molecules into core and R-groups
-        2. Find pairs with same core but different R-groups
-        3. Calculate ΔpIC50 for each pair
-        4. Identify frequently occurring transformations
-        """)
 
 # Helper functions (only define if RDKit is available)
 if RDKIT_AVAILABLE:
@@ -225,69 +243,175 @@ if RDKIT_AVAILABLE:
             atm.SetAtomMapNum(0)
         return mol
 
-    def sort_fragments(mol):
-        """Sort fragments by number of atoms"""
+    def sort_fragments(mol, min_size=1, max_size=100):
+        """Sort fragments by number of atoms, filtering by size"""
         if mol is None:
             return []
         try:
             frag_list = list(Chem.GetMolFrags(mol, asMols=True, sanitizeFrags=False))
             frag_list = [remove_map_nums(x) for x in frag_list]
-            frag_num_atoms_list = [(x.GetNumAtoms(), x) for x in frag_list]
-            frag_num_atoms_list.sort(key=itemgetter(0), reverse=True)
-            return [x[1] for x in frag_num_atoms_list]
+            
+            # Filter fragments by size
+            filtered_frags = []
+            for frag in frag_list:
+                num_atoms = frag.GetNumAtoms()
+                if min_size <= num_atoms <= max_size:
+                    filtered_frags.append((num_atoms, frag))
+            
+            # Sort by number of atoms
+            filtered_frags.sort(key=itemgetter(0), reverse=True)
+            return [x[1] for x in filtered_frags]
         except Exception as e:
             return []
 
-    def FragmentMol(mol, maxCuts=1):
-        """Simple fragmentation function - try to break single bonds"""
-        results = []
-        try:
-            # Create a copy to avoid modifying original
-            mol_copy = Chem.Mol(mol)
+    def find_cuttable_bonds(mol, single_bonds_only=True, exclude_rings=True):
+        """Find bonds that can be cut"""
+        cuttable_bonds = []
+        for bond in mol.GetBonds():
+            # Check bond type
+            if single_bonds_only and bond.GetBondType() != Chem.BondType.SINGLE:
+                continue
             
-            # Try to break single bonds
-            for bond in mol_copy.GetBonds():
-                if bond.GetBondType() == Chem.BondType.SINGLE:
-                    try:
-                        # Create editable molecule
-                        emol = Chem.EditableMol(mol_copy)
-                        emol.RemoveBond(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())
-                        frag_mol = emol.GetMol()
-                        
-                        # Try to sanitize
-                        try:
-                            Chem.SanitizeMol(frag_mol)
-                        except:
-                            pass
-                        
-                        results.append((f"CUT_{bond.GetIdx()}", frag_mol))
-                    except:
-                        continue
-        except Exception as e:
-            pass
+            # Check if bond is in a ring
+            if exclude_rings and bond.IsInRing():
+                continue
+            
+            # Check if cutting would create very small fragments
+            begin_atom = bond.GetBeginAtom()
+            end_atom = bond.GetEndAtom()
+            
+            # Simple check: don't cut bonds to terminal atoms
+            if begin_atom.GetDegree() == 1 or end_atom.GetDegree() == 1:
+                continue
+            
+            cuttable_bonds.append(bond.GetIdx())
         
-        # Return at least the original molecule
-        if not results:
-            results.append(("NO_CUT", mol))
+        return cuttable_bonds
+
+    def recursive_fragmentation(mol, max_cuts=2, current_cut=0, 
+                               single_bonds_only=True, exclude_rings=True,
+                               min_fragment_size=5, max_fragment_size=50):
+        """Recursively fragment molecules with multiple cuts"""
+        if current_cut >= max_cuts or mol is None:
+            return []
+        
+        results = []
+        cuttable_bonds = find_cuttable_bonds(mol, single_bonds_only, exclude_rings)
+        
+        for bond_idx in cuttable_bonds:
+            try:
+                # Create copy and cut the bond
+                emol = Chem.EditableMol(mol)
+                bond = mol.GetBondWithIdx(bond_idx)
+                emol.RemoveBond(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())
+                frag_mol = emol.GetMol()
+                
+                # Try to sanitize
+                try:
+                    Chem.SanitizeMol(frag_mol)
+                except:
+                    pass
+                
+                # Sort fragments
+                sorted_frags = sort_fragments(frag_mol, min_fragment_size, max_fragment_size)
+                
+                if len(sorted_frags) >= 2:
+                    # Record this fragmentation
+                    frag_smiles = [Chem.MolToSmiles(f) for f in sorted_frags]
+                    results.append({
+                        'cut_level': current_cut + 1,
+                        'bond_idx': bond_idx,
+                        'fragments': sorted_frags,
+                        'frag_smiles': frag_smiles,
+                        'core': sorted_frags[0] if len(sorted_frags) > 0 else None,
+                        'r_groups': sorted_frags[1:] if len(sorted_frags) > 1 else []
+                    })
+                
+                # Recursively fragment further
+                if current_cut + 1 < max_cuts:
+                    for frag in sorted_frags:
+                        sub_results = recursive_fragmentation(
+                            frag, max_cuts, current_cut + 1,
+                            single_bonds_only, exclude_rings,
+                            min_fragment_size, max_fragment_size
+                        )
+                        results.extend(sub_results)
+                        
+            except Exception as e:
+                continue
         
         return results
 
-    def perform_mmp_analysis(df, min_transform_occurrence, show_debug=False):
-        """Perform MMP analysis matching the original logic EXACTLY"""
+    def multi_cut_fragmentation(mol, max_cuts=2, **kwargs):
+        """Perform multi-cut fragmentation on a molecule"""
+        if mol is None:
+            return []
+        
+        # Always include the whole molecule (0 cuts)
+        results = [{
+            'cut_level': 0,
+            'bond_idx': None,
+            'fragments': [mol],
+            'frag_smiles': [Chem.MolToSmiles(mol)],
+            'core': mol,
+            'r_groups': []
+        }]
+        
+        # Perform recursive fragmentation
+        recursive_results = recursive_fragmentation(mol, max_cuts, **kwargs)
+        results.extend(recursive_results)
+        
+        return results
+
+    def get_unique_cores(fragmentation_results, keep_largest_only=False):
+        """Extract unique cores from fragmentation results"""
+        unique_cores = {}
+        
+        for result in fragmentation_results:
+            if result['core'] is not None:
+                try:
+                    core_smiles = Chem.MolToSmiles(result['core'])
+                    if core_smiles not in unique_cores:
+                        unique_cores[core_smiles] = {
+                            'mol': result['core'],
+                            'cut_level': result['cut_level'],
+                            'r_groups': result['r_groups'],
+                            'frag_smiles': result['frag_smiles']
+                        }
+                    elif not keep_largest_only:
+                        # Keep the version with more R-groups
+                        current_r_count = len(unique_cores[core_smiles]['r_groups'])
+                        new_r_count = len(result['r_groups'])
+                        if new_r_count > current_r_count:
+                            unique_cores[core_smiles] = {
+                                'mol': result['core'],
+                                'cut_level': result['cut_level'],
+                                'r_groups': result['r_groups'],
+                                'frag_smiles': result['frag_smiles']
+                            }
+                except:
+                    continue
+        
+        return unique_cores
+
+    def perform_mmp_analysis(df, min_transform_occurrence, max_cuts=2, 
+                           min_fragment_size=5, max_fragment_size=50,
+                           single_bonds_only=True, exclude_rings=True,
+                           keep_largest_core_only=False, show_debug=False):
+        """Perform MMP analysis with multi-cut support"""
         if df is None or len(df) == 0:
-            return None, None
+            return None, None, None
         
         # Progress tracking
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # Step 1: Decompose molecules - EXACTLY as in original
-        status_text.text("Step 1/4: Decomposing molecules...")
+        # Step 1: Decompose molecules with multi-cut support
+        status_text.text("Step 1/4: Decomposing molecules with multi-cut...")
         progress_bar.progress(25)
         
-        row_list = []
-        successful = 0
-        failed = 0
+        all_rows = []
+        cut_level_stats = {i: 0 for i in range(max_cuts + 1)}
         
         for idx, row in df.iterrows():
             smiles = row['SMILES']
@@ -296,105 +420,106 @@ if RDKIT_AVAILABLE:
             mol = row['mol']
             
             if mol is None:
-                failed += 1
                 continue
                 
             try:
-                frag_list = FragmentMol(mol, maxCuts=1)
-                for _, frag_mol in frag_list:
-                    pair_list = sort_fragments(frag_mol)
-                    if len(pair_list) >= 2:
-                        # Convert to SMILES with error handling
+                # Perform multi-cut fragmentation
+                frag_results = multi_cut_fragmentation(
+                    mol, 
+                    max_cuts=max_cuts,
+                    single_bonds_only=single_bonds_only,
+                    exclude_rings=exclude_rings,
+                    min_fragment_size=min_fragment_size,
+                    max_fragment_size=max_fragment_size
+                )
+                
+                # Get unique cores
+                unique_cores = get_unique_cores(frag_results, keep_largest_core_only)
+                
+                # Process each unique core
+                for core_smiles, core_info in unique_cores.items():
+                    cut_level = core_info['cut_level']
+                    cut_level_stats[cut_level] += 1
+                    
+                    # Process R-groups
+                    for rgroup_idx, rgroup in enumerate(core_info['r_groups']):
                         try:
-                            core_smiles = Chem.MolToSmiles(pair_list[0])
-                            rgroup_smiles = Chem.MolToSmiles(pair_list[1])
-                            tmp_list = [smiles, core_smiles, rgroup_smiles, name, pIC50]
-                            row_list.append(tmp_list)
-                            successful += 1
+                            rgroup_smiles = Chem.MolToSmiles(rgroup)
+                            # Add map numbers for attachment points
+                            rgroup_with_star = rgroup_smiles + '[*]'
+                            
+                            all_rows.append([
+                                smiles, core_smiles, rgroup_with_star, 
+                                name, pIC50, cut_level, rgroup_idx + 1
+                            ])
                         except:
-                            failed += 1
+                            continue
+                            
             except Exception as e:
-                failed += 1
+                if show_debug:
+                    st.warning(f"Error fragmenting molecule {name}: {str(e)}")
                 continue
         
-        if not row_list:
+        if not all_rows:
             st.error("No valid fragments found")
-            return None, None
+            return None, None, cut_level_stats
         
-        # Create DataFrame with EXACT same column order as original
-        row_df = pd.DataFrame(row_list, columns=["SMILES", "Core", "R_group", "Name", "pIC50"])
+        # Create DataFrame
+        row_df = pd.DataFrame(all_rows, columns=[
+            "SMILES", "Core", "R_group", "Name", "pIC50", "Cut_Level", "R_Group_Num"
+        ])
         
         if show_debug:
             with st.expander("Debug: Row DataFrame", expanded=False):
                 st.write(f"Total rows: {len(row_df)}")
+                st.write(f"Unique cores: {row_df['Core'].nunique()}")
+                st.write(f"Cut level distribution: {cut_level_stats}")
                 st.dataframe(row_df.head(20))
-                st.write("Unique cores:", row_df['Core'].nunique())
-                st.write("Sample cores:", row_df['Core'].head(10).tolist())
         
-        if failed > 0:
-            st.info(f"Successfully processed {successful} molecules, failed on {failed}")
-        
-        # Step 2: Collect pairs - MATCHING ORIGINAL EXACTLY
+        # Step 2: Collect pairs
         status_text.text("Step 2/4: Collecting molecular pairs...")
         progress_bar.progress(50)
         
         delta_list = []
-        cores_with_pairs = 0
-        total_combinations = 0
+        core_pair_stats = {}
         
-        # Group by Core and iterate through each group
-        for k, v in row_df.groupby("Core"):
-            # CRITICAL: Only process groups with more than 2 compounds (matches original)
+        # Group by Core and R_Group_Num (to match specific attachment points)
+        for (core_smiles, r_group_num), v in row_df.groupby(["Core", "R_Group_Num"]):
+            # Only process groups with more than 2 compounds
             if len(v) > 2:
-                cores_with_pairs += 1
-                # Generate all unique combinations of indices
-                combinations_list = list(combinations(range(0, len(v)), 2))
-                total_combinations += len(combinations_list)
+                core_pair_stats[(core_smiles, r_group_num)] = len(v)
                 
-                for a, b in combinations_list:
+                # Generate all unique combinations
+                for a, b in combinations(range(0, len(v)), 2):
                     reagent_a = v.iloc[a]
                     reagent_b = v.iloc[b]
                     
-                    # Skip if same molecule (shouldn't happen with combinations but check anyway)
                     if reagent_a.SMILES == reagent_b.SMILES:
                         continue
                     
-                    # Sort by SMILES for canonical ordering (matches original)
+                    # Sort by SMILES for canonical ordering
                     reagent_a, reagent_b = sorted([reagent_a, reagent_b], key=lambda x: x.SMILES)
                     
                     # Calculate delta
                     delta = reagent_b.pIC50 - reagent_a.pIC50
                     
-                    # Create transform string - MATCH ORIGINAL FORMAT EXACTLY
-                    # Note: The replace('*','*-') is critical
-                    transform_str = f"{reagent_a.R_group.replace('*','*-')}>>{reagent_b.R_group.replace('*','*-')}"
+                    # Create transform string
+                    transform_str = f"{reagent_a.R_group.replace('[*]','*-')}>>{reagent_b.R_group.replace('[*]','*-')}"
                     
-                    # CRITICAL: Create the list in EXACT same order as original
-                    # Original code: list(reagent_a.values) + list(reagent_b.values) + [transform_str, delta]
                     delta_list.append([
-                        reagent_a.SMILES, reagent_a.Core, reagent_a.R_group, reagent_a.Name, reagent_a.pIC50,
-                        reagent_b.SMILES, reagent_b.Core, reagent_b.R_group, reagent_b.Name, reagent_b.pIC50,
+                        reagent_a.SMILES, reagent_a.Core, reagent_a.R_group, reagent_a.Name, reagent_a.pIC50, reagent_a.Cut_Level,
+                        reagent_b.SMILES, reagent_b.Core, reagent_b.R_group, reagent_b.Name, reagent_b.pIC50, reagent_b.Cut_Level,
                         transform_str, delta
                     ])
         
-        if show_debug:
-            with st.expander("Debug: Pair Generation", expanded=False):
-                st.write(f"Cores with >2 compounds: {cores_with_pairs}")
-                st.write(f"Total possible combinations: {total_combinations}")
-                st.write(f"Actual pairs generated: {len(delta_list)}")
-                if delta_list:
-                    st.write("First 3 pairs:")
-                    for i, pair in enumerate(delta_list[:3]):
-                        st.write(f"Pair {i+1}: {pair[:5]} ... {pair[5:10]} ... Δ={pair[-1]:.3f}")
-        
         if not delta_list:
             st.error("No molecular pairs found")
-            return None, None
+            return None, None, cut_level_stats
         
-        # Create DataFrame with EXACT same column names as expected
+        # Create DataFrame
         cols = [
-            "SMILES_1", "Core_1", "R_group_1", "Name_1", "pIC50_1",
-            "SMILES_2", "Core_2", "R_group_2", "Name_2", "pIC50_2",
+            "SMILES_1", "Core_1", "R_group_1", "Name_1", "pIC50_1", "Cut_Level_1",
+            "SMILES_2", "Core_2", "R_group_2", "Name_2", "pIC50_2", "Cut_Level_2",
             "Transform", "Delta"
         ]
         delta_df = pd.DataFrame(delta_list, columns=cols)
@@ -402,11 +527,10 @@ if RDKIT_AVAILABLE:
         if show_debug:
             with st.expander("Debug: Delta DataFrame", expanded=False):
                 st.write(f"Delta DataFrame shape: {delta_df.shape}")
+                st.write(f"Cores with pairs: {len(core_pair_stats)}")
                 st.dataframe(delta_df.head(10))
-                st.write("Column names:", delta_df.columns.tolist())
-                st.write("Unique transforms:", delta_df['Transform'].nunique())
         
-        # Step 3: Collect frequent transforms - MATCHING ORIGINAL
+        # Step 3: Collect frequent transforms
         status_text.text("Step 3/4: Analyzing transformations...")
         progress_bar.progress(75)
         
@@ -414,36 +538,29 @@ if RDKIT_AVAILABLE:
         for k, v in delta_df.groupby("Transform"):
             # Only include transforms with minimum occurrences
             if len(v) >= min_transform_occurrence:
-                mmp_list.append([k, len(v), v.Delta.values])
-        
-        if show_debug:
-            with st.expander("Debug: Transform Collection", expanded=False):
-                st.write(f"Total unique transforms: {delta_df['Transform'].nunique()}")
-                st.write(f"Transforms with >= {min_transform_occurrence} occurrences: {len(mmp_list)}")
-                if mmp_list:
-                    st.write("First 5 transforms:")
-                    for i, transform in enumerate(mmp_list[:5]):
-                        st.write(f"Transform {i+1}: {transform[0]} - Count: {transform[1]}")
+                mmp_list.append([
+                    k, len(v), v.Delta.values,
+                    v['Cut_Level_1'].iloc[0],  # Cut level for this transform
+                    list(v['Core_1'].unique())  # Cores where this transform appears
+                ])
         
         if not mmp_list:
             st.warning(f"No transforms found with {min_transform_occurrence}+ occurrences")
-            return delta_df, None
+            return delta_df, None, cut_level_stats
         
         # Create transforms DataFrame
-        mmp_df = pd.DataFrame(mmp_list, columns=["Transform", "Count", "Deltas"])
-        mmp_df['idx'] = range(0, len(mmp_df))
+        mmp_df = pd.DataFrame(mmp_list, columns=[
+            "Transform", "Count", "Deltas", "Cut_Level", "Cores"
+        ])
         mmp_df['mean_delta'] = [x.mean() for x in mmp_df.Deltas]
         
-        # Create reaction molecules with error handling - MATCH ORIGINAL
+        # Create reaction molecules
         rxn_mols = []
         for transform in mmp_df['Transform']:
             try:
-                # IMPORTANT: Use the same SMARTS conversion as original
-                # Note: replace('*-','*') reverses the earlier replace('*','*-')
                 rxn = AllChem.ReactionFromSmarts(transform.replace('*-','*'), useSmiles=True)
                 rxn_mols.append(rxn)
-            except Exception as e:
-                # If that fails, try alternative approach
+            except:
                 try:
                     parts = transform.split('>>')
                     if len(parts) == 2:
@@ -465,21 +582,21 @@ if RDKIT_AVAILABLE:
         status_text.empty()
         progress_bar.empty()
         
-        return delta_df, mmp_df
+        return delta_df, mmp_df, cut_level_stats
 
     def plot_stripplot_to_fig(deltas):
         """Create a stripplot figure"""
         fig, ax = plt.subplots(figsize=(4, 1.5))
-        sns.stripplot(x=deltas, ax=ax, jitter=0.2, alpha=0.7, s=5, color='blue')
-        ax.axvline(0, ls='--', c='red')
-        
-        # Set appropriate x limits based on data
         if len(deltas) > 0:
+            sns.stripplot(x=deltas, ax=ax, jitter=0.2, alpha=0.7, s=5, color='blue')
+            ax.axvline(0, ls='--', c='red')
+            
             data_min = min(deltas)
             data_max = max(deltas)
             padding = max(0.5, (data_max - data_min) * 0.1)
             ax.set_xlim(data_min - padding, data_max + padding)
         else:
+            ax.axvline(0, ls='--', c='red')
             ax.set_xlim(-5, 5)
             
         ax.set_xlabel('ΔpIC50')
@@ -507,74 +624,49 @@ if RDKIT_AVAILABLE:
         
         example_list = []
         for _, row in examples.sort_values("Delta", ascending=False).iterrows():
-            # Create two entries for each pair
             example_list.append({
                 "SMILES": row['SMILES_1'],
                 "Name": row['Name_1'],
                 "pIC50": row['pIC50_1'],
-                "Type": "Before"
+                "Type": "Before",
+                "Cut_Level": row['Cut_Level_1']
             })
             example_list.append({
                 "SMILES": row['SMILES_2'],
                 "Name": row['Name_2'],
                 "pIC50": row['pIC50_2'],
-                "Type": "After"
+                "Type": "After",
+                "Cut_Level": row['Cut_Level_2']
             })
         
         return pd.DataFrame(example_list)
 
-    def display_molecule_grid(smiles_list, names_list, pIC50_list):
-        """Display molecules in a grid"""
-        cols = st.columns(4)
-        for idx, (smiles, name, pIC50) in enumerate(zip(smiles_list, names_list, pIC50_list)):
-            with cols[idx % 4]:
+    def visualize_fragmentation_example(mol, max_cuts=2, **kwargs):
+        """Visualize fragmentation for a molecule"""
+        if mol is None:
+            return None
+        
+        frag_results = multi_cut_fragmentation(mol, max_cuts=max_cuts, **kwargs)
+        
+        visualization_data = []
+        for result in frag_results:
+            if result['cut_level'] > 0 and len(result['fragments']) >= 2:
                 try:
-                    mol = Chem.MolFromSmiles(smiles)
-                    if mol:
-                        img = Draw.MolToImage(mol, size=(200, 200))
-                        st.image(img, caption=f"{name} (pIC50: {pIC50:.2f})")
+                    # Create a simple visualization
+                    core_img = Draw.MolToImage(result['core'], size=(200, 200))
+                    rgroup_imgs = [Draw.MolToImage(rg, size=(100, 100)) for rg in result['r_groups']]
+                    
+                    visualization_data.append({
+                        'cut_level': result['cut_level'],
+                        'core': result['core'],
+                        'core_smiles': Chem.MolToSmiles(result['core']),
+                        'r_groups': result['r_groups'],
+                        'rgroup_smiles': [Chem.MolToSmiles(rg) for rg in result['r_groups']]
+                    })
                 except:
-                    st.write(f"{name}: {smiles}")
-
-    def original_approach_simulation(row_df, show_debug=False):
-        """Simulate the original approach for comparison"""
-        original_delta_list = []
+                    continue
         
-        for k, v in row_df.groupby("Core"):
-            if len(v) > 2:
-                for a, b in combinations(range(0, len(v)), 2):
-                    reagent_a = v.iloc[a]
-                    reagent_b = v.iloc[b]
-                    
-                    if reagent_a.SMILES == reagent_b.SMILES:
-                        continue
-                    
-                    reagent_a, reagent_b = sorted([reagent_a, reagent_b], key=lambda x: x.SMILES)
-                    
-                    delta = reagent_b.pIC50 - reagent_a.pIC50
-                    
-                    # EXACTLY as in the original code snippet
-                    original_delta_list.append(
-                        list(reagent_a.values) + 
-                        list(reagent_b.values) +
-                        [f"{reagent_a.R_group.replace('*','*-')}>>{reagent_b.R_group.replace('*','*-')}", delta]
-                    )
-        
-        if original_delta_list:
-            cols = [
-                "SMILES_1", "Core_1", "R_group_1", "Name_1", "pIC50_1",
-                "SMILES_2", "Core_2", "R_group_2", "Name_2", "pIC50_2",
-                "Transform", "Delta"
-            ]
-            original_df = pd.DataFrame(original_delta_list, columns=cols)
-            
-            if show_debug:
-                with st.expander("Debug: Original Approach", expanded=False):
-                    st.write(f"Original approach pairs: {len(original_df)}")
-                    st.dataframe(original_df.head(10))
-            
-            return original_df
-        return None
+        return visualization_data
 
 # Main app logic
 if not RDKIT_AVAILABLE:
@@ -606,17 +698,6 @@ if not RDKIT_AVAILABLE:
     ```
     """)
     
-    # Show requirements
-    with st.expander("Requirements"):
-        st.code("""
-        streamlit>=1.28.0
-        pandas>=2.0.0
-        numpy<2  # Important for RDKit compatibility
-        matplotlib>=3.7.0
-        seaborn>=0.12.0
-        rdkit-pypi>=2023.9.0
-        """, language="bash")
-    
 elif uploaded_file is not None:
     # Get parameters from sidebar
     sanitize = sanitize_molecules
@@ -635,60 +716,140 @@ elif uploaded_file is not None:
             col3.metric("Max pIC50", f"{df['pIC50'].max():.2f}")
             col4.metric("Avg pIC50", f"{df['pIC50'].mean():.2f}")
             
-            st.dataframe(df[['SMILES', 'Name', 'pIC50']].head(10))
+            # Show sample molecules
+            st.subheader("Sample Molecules")
+            cols = st.columns(4)
+            for idx, (_, row) in enumerate(df.head(8).iterrows()):
+                with cols[idx % 4]:
+                    try:
+                        mol = row['mol']
+                        if mol:
+                            img = Draw.MolToImage(mol, size=(200, 200))
+                            name = row.get('Name', f"Compound {idx+1}")
+                            st.image(img, caption=f"{name} (pIC50: {row['pIC50']:.2f})")
+                    except:
+                        pass
         
-        # Perform MMP analysis
-        st.markdown('<h2 class="section-header">🔍 MMP Analysis Results</h2>', unsafe_allow_html=True)
+        # Perform MMP analysis with multi-cut
+        st.markdown('<h2 class="section-header">🔍 MMP Analysis with Multi-Cut Support</h2>', unsafe_allow_html=True)
         
-        delta_df, mmp_df = perform_mmp_analysis(df, min_occurrence, show_debug)
+        delta_df, mmp_df, cut_level_stats = perform_mmp_analysis(
+            df, 
+            min_occurrence,
+            max_cuts=max_cuts,
+            min_fragment_size=min_fragment_size,
+            max_fragment_size=max_fragment_size,
+            single_bonds_only=fragment_single_bonds_only,
+            exclude_rings=exclude_rings_from_cuts,
+            keep_largest_core_only=keep_largest_core_only,
+            show_debug=show_debug
+        )
         
         if delta_df is not None:
-            # Show statistics
-            st.success("Analysis complete!")
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Total Pairs Generated", len(delta_df))
+            # Show cut-level statistics
+            if show_cut_level_analysis and cut_level_stats:
+                st.markdown('<h3 class="section-header">✂️ Cut Level Analysis</h3>', unsafe_allow_html=True)
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("0-cut (Whole molecule)", cut_level_stats.get(0, 0))
+                with col2:
+                    st.metric("1-cut pairs", cut_level_stats.get(1, 0))
+                with col3:
+                    total_multi_cut = sum(v for k, v in cut_level_stats.items() if k > 1)
+                    st.metric("Multi-cut (2+) pairs", total_multi_cut)
+                
+                # Show distribution
+                fig, ax = plt.subplots(figsize=(8, 4))
+                levels = list(cut_level_stats.keys())
+                counts = [cut_level_stats[l] for l in levels]
+                
+                bars = ax.bar(levels, counts, color='skyblue', edgecolor='black')
+                ax.set_xlabel('Cut Level')
+                ax.set_ylabel('Number of Fragments')
+                ax.set_title('Fragmentation by Cut Level')
+                ax.set_xticks(levels)
+                
+                # Add count labels on bars
+                for bar, count in zip(bars, counts):
+                    height = bar.get_height()
+                    ax.text(bar.get_x() + bar.get_width()/2., height + max(counts)*0.01,
+                           f'{count}', ha='center', va='bottom')
+                
+                plt.tight_layout()
+                st.pyplot(fig)
+                
+                # Explanation of cut levels
+                with st.expander("📝 What do cut levels mean?"):
+                    st.markdown("""
+                    **Cut Levels Explained:**
+                    - **0-cut**: Whole molecule treated as core (no fragmentation)
+                    - **1-cut**: Single bond cut, creating 2 fragments
+                    - **2-cut**: Two bonds cut, potentially creating 3 fragments
+                    - **3+ cuts**: Complex fragmentation patterns
+                    
+                    **Multi-cut advantages:**
+                    1. Identifies more complex transformations
+                    2. Can handle multiple R-group modifications simultaneously
+                    3. Better for analyzing complex scaffolds
+                    4. More comprehensive coverage of chemical space
+                    """)
             
-            # Optional: Compare with original approach
-            if show_debug and 'row_df' in locals():
-                original_df = original_approach_simulation(row_df, show_debug)
-                if original_df is not None:
-                    comparison_col1, comparison_col2 = st.columns(2)
-                    with comparison_col1:
-                        st.info(f"Current approach pairs: {len(delta_df)}")
-                        st.dataframe(delta_df[['SMILES_1', 'SMILES_2', 'Transform', 'Delta']].head(5))
-                    
-                    with comparison_col2:
-                        st.info(f"Original approach pairs: {len(original_df)}")
-                        st.dataframe(original_df[['SMILES_1', 'SMILES_2', 'Transform', 'Delta']].head(5))
-                    
-                    # Check if identical
-                    delta_df_sorted = delta_df.sort_values(['SMILES_1', 'SMILES_2']).reset_index(drop=True)
-                    original_df_sorted = original_df.sort_values(['SMILES_1', 'SMILES_2']).reset_index(drop=True)
-                    
-                    if delta_df_sorted.equals(original_df_sorted):
-                        st.success("✅ Both approaches give identical results!")
-                    else:
-                        st.warning("⚠️ Approaches differ!")
-                        # Show differences
-                        diff_mask = ~delta_df_sorted['Transform'].eq(original_df_sorted['Transform'])
-                        if diff_mask.any():
-                            st.write("Different transforms:")
-                            st.dataframe(pd.DataFrame({
-                                'Current': delta_df_sorted.loc[diff_mask, 'Transform'].values,
-                                'Original': original_df_sorted.loc[diff_mask, 'Transform'].values
-                            }))
+            # Show general statistics
+            st.success(f"Analysis complete! Found {len(delta_df)} molecular pairs")
             
             if mmp_df is not None:
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("Total Pairs", len(delta_df))
                 col2.metric("Unique Transforms", len(mmp_df))
-                col3.metric("Avg Transform Frequency", f"{mmp_df['Count'].mean():.1f}")
+                col3.metric("Avg Occurrences", f"{mmp_df['Count'].mean():.1f}")
+                col4.metric("Max Cut Level", f"{mmp_df['Cut_Level'].max():.0f}")
                 
                 # Sort transforms by mean delta
                 mmp_df_sorted = mmp_df.sort_values("mean_delta", ascending=False)
                 
-                # Show top positive transforms
+                # Group by cut level for analysis
+                mmp_df_by_cut = mmp_df_sorted.groupby('Cut_Level')
+                
+                # Show transforms by cut level
+                if show_cut_level_analysis:
+                    for cut_level, group in mmp_df_by_cut:
+                        if len(group) > 0:
+                            st.markdown(f'<div class="cut-level"><h4>Cut Level {cut_level} Transforms</h4></div>', unsafe_allow_html=True)
+                            
+                            # Show top 3 from this cut level
+                            top_transforms = group.head(3)
+                            
+                            for i, (_, row) in enumerate(top_transforms.iterrows()):
+                                with st.container():
+                                    col1, col2, col3 = st.columns([1, 2, 1])
+                                    
+                                    with col1:
+                                        img_base64 = get_rxn_image(row['rxn_mol'])
+                                        if img_base64:
+                                            st.markdown(f'<img src="data:image/png;base64,{img_base64}" width="300">', unsafe_allow_html=True)
+                                        else:
+                                            st.info("Image not available")
+                                    
+                                    with col2:
+                                        st.markdown(f"""
+                                        <div class="transform-card">
+                                            <h4>Transform (Cut Level {cut_level})</h4>
+                                            <p><strong>Transformation:</strong> {row['Transform']}</p>
+                                            <p><strong>Mean ΔpIC50:</strong> {row['mean_delta']:.2f}</p>
+                                            <p><strong>Occurrences:</strong> {row['Count']}</p>
+                                            <p><strong>Cores Found:</strong> {len(row['Cores'])} unique cores</p>
+                                        </div>
+                                        """, unsafe_allow_html=True)
+                                    
+                                    with col3:
+                                        fig = plot_stripplot_to_fig(row['Deltas'])
+                                        st.pyplot(fig)
+                
+                # Show top positive transforms (all cut levels combined)
                 if show_top_positive and len(mmp_df_sorted) > 0:
-                    st.markdown('<h3 class="section-header">📈 Top Positive Transformations</h3>', unsafe_allow_html=True)
-                    top_positive = mmp_df_sorted.head(min(3, len(mmp_df_sorted)))
+                    st.markdown('<h3 class="section-header">📈 Top Positive Transformations (All Cut Levels)</h3>', unsafe_allow_html=True)
+                    top_positive = mmp_df_sorted.head(min(5, len(mmp_df_sorted)))
                     
                     for i, (_, row) in enumerate(top_positive.iterrows()):
                         with st.container():
@@ -704,7 +865,7 @@ elif uploaded_file is not None:
                             with col2:
                                 st.markdown(f"""
                                 <div class="transform-card">
-                                    <h4>Transform #{i+1}</h4>
+                                    <h4>Top Transform #{i+1} (Cut Level {row['Cut_Level']})</h4>
                                     <p><strong>Transformation:</strong> {row['Transform']}</p>
                                     <p><strong>Mean ΔpIC50:</strong> {row['mean_delta']:.2f}</p>
                                     <p><strong>Occurrences:</strong> {row['Count']}</p>
@@ -721,25 +882,12 @@ elif uploaded_file is not None:
                                 examples_df = find_examples(delta_df, row['Transform'])
                                 if examples_df is not None and len(examples_df) > 0:
                                     with st.expander(f"View {len(examples_df)//2} compound pairs for this transform"):
-                                        # Display as table first
                                         st.dataframe(examples_df)
-                                        
-                                        # Try to display molecules if possible
-                                        try:
-                                            cols = st.columns(4)
-                                            for idx, (_, example_row) in enumerate(examples_df.iterrows()):
-                                                mol = Chem.MolFromSmiles(example_row['SMILES'])
-                                                if mol:
-                                                    with cols[idx % 4]:
-                                                        img = Draw.MolToImage(mol, size=(200, 200))
-                                                        st.image(img, caption=f"{example_row['Name']} (pIC50: {example_row['pIC50']:.2f})")
-                                        except:
-                                            pass
                 
                 # Show top negative transforms
                 if show_top_negative and len(mmp_df_sorted) > 0:
                     st.markdown('<h3 class="section-header">📉 Top Negative Transformations</h3>', unsafe_allow_html=True)
-                    top_negative = mmp_df_sorted.tail(min(3, len(mmp_df_sorted))).iloc[::-1]
+                    top_negative = mmp_df_sorted.tail(min(5, len(mmp_df_sorted))).iloc[::-1]
                     
                     for i, (_, row) in enumerate(top_negative.iterrows()):
                         with st.container():
@@ -755,7 +903,7 @@ elif uploaded_file is not None:
                             with col2:
                                 st.markdown(f"""
                                 <div class="transform-card">
-                                    <h4>Transform #{i+1} (Negative)</h4>
+                                    <h4>Top Negative Transform #{i+1} (Cut Level {row['Cut_Level']})</h4>
                                     <p><strong>Transformation:</strong> {row['Transform']}</p>
                                     <p><strong>Mean ΔpIC50:</strong> {row['mean_delta']:.2f}</p>
                                     <p><strong>Occurrences:</strong> {row['Count']}</p>
@@ -766,26 +914,6 @@ elif uploaded_file is not None:
                             with col3:
                                 fig = plot_stripplot_to_fig(row['Deltas'])
                                 st.pyplot(fig)
-                            
-                            # Show compound examples
-                            if show_compound_examples:
-                                examples_df = find_examples(delta_df, row['Transform'])
-                                if examples_df is not None and len(examples_df) > 0:
-                                    with st.expander(f"View {len(examples_df)//2} compound pairs for this transform"):
-                                        # Display as table first
-                                        st.dataframe(examples_df)
-                                        
-                                        # Try to display molecules if possible
-                                        try:
-                                            cols = st.columns(4)
-                                            for idx, (_, example_row) in enumerate(examples_df.iterrows()):
-                                                mol = Chem.MolFromSmiles(example_row['SMILES'])
-                                                if mol:
-                                                    with cols[idx % 4]:
-                                                        img = Draw.MolToImage(mol, size=(200, 200))
-                                                        st.image(img, caption=f"{example_row['Name']} (pIC50: {example_row['pIC50']:.2f})")
-                                        except:
-                                            pass
                 
                 # Show all transforms table
                 if len(mmp_df_sorted) > 0:
@@ -796,9 +924,13 @@ elif uploaded_file is not None:
                     else:
                         display_df = mmp_df_sorted.head(transforms_to_display)
                     
-                    # Simple table display
-                    st.dataframe(display_df[['Transform', 'Count', 'mean_delta']].rename(
-                        columns={'mean_delta': 'Mean ΔpIC50'}
+                    # Display with cut level information
+                    display_columns = ['Transform', 'Cut_Level', 'Count', 'mean_delta']
+                    st.dataframe(display_df[display_columns].rename(
+                        columns={
+                            'mean_delta': 'Mean ΔpIC50',
+                            'Cut_Level': 'Cuts'
+                        }
                     ).round(3))
                     
                     # Option to view full data
@@ -806,20 +938,30 @@ elif uploaded_file is not None:
                         st.dataframe(display_df)
                 
                 # Export results
-                if save_results and mmp_df is not None:
+                if save_results and mmp_df_sorted is not None:
                     st.markdown('<h3 class="section-header">💾 Export Results</h3>', unsafe_allow_html=True)
                     
-                    # Create downloadable files
                     @st.cache_data
                     def convert_df_to_csv(df):
                         return df.to_csv(index=False).encode('utf-8')
                     
                     @st.cache_data
-                    def convert_df_to_excel(df):
+                    def convert_df_to_excel(df_dict):
                         output = io.BytesIO()
                         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                            df.to_excel(writer, index=False, sheet_name='MMP_Results')
+                            for sheet_name, df in df_dict.items():
+                                df.to_excel(writer, index=False, sheet_name=sheet_name)
                         return output.getvalue()
+                    
+                    # Prepare data for export
+                    export_data = {
+                        'MMP_Results': mmp_df_sorted,
+                        'Molecular_Pairs': delta_df,
+                        'Cut_Level_Stats': pd.DataFrame({
+                            'Cut_Level': list(cut_level_stats.keys()),
+                            'Count': list(cut_level_stats.values())
+                        })
+                    }
                     
                     col1, col2 = st.columns(2)
                     
@@ -827,74 +969,53 @@ elif uploaded_file is not None:
                         st.download_button(
                             label="📥 Download MMP Results (CSV)",
                             data=convert_df_to_csv(mmp_df_sorted),
-                            file_name="mmp_results.csv",
+                            file_name="mmp_results_multi_cut.csv",
                             mime="text/csv"
                         )
                     
                     with col2:
+                        excel_data = convert_df_to_excel(export_data)
                         st.download_button(
-                            label="📥 Download MMP Results (Excel)",
-                            data=convert_df_to_excel(mmp_df_sorted),
-                            file_name="mmp_results.xlsx",
+                            label="📥 Download Complete Analysis (Excel)",
+                            data=excel_data,
+                            file_name="mmp_analysis_multi_cut.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                         )
-                    
-                    # Also provide delta pairs
-                    st.download_button(
-                        label="📥 Download All Molecular Pairs (CSV)",
-                        data=convert_df_to_csv(delta_df),
-                        file_name="mmp_pairs.csv",
-                        mime="text/csv"
-                    )
             
             else:
-                st.info(f"No transformations found with {min_occurrence}+ occurrences. Try reducing the minimum occurrence threshold.")
+                st.info(f"No transformations found with {min_occurrence}+ occurrences. Try reducing the minimum occurrence threshold or increasing max cuts.")
     else:
         st.warning("No valid molecules found in the dataset. Please check your SMILES strings.")
 else:
-    # Show welcome message when no file is uploaded
+    # Show welcome message
     st.markdown("""
-    ## Welcome to the MMP Analysis Tool! 👋
+    ## Welcome to the MMP Analysis Tool with Multi-Cut Support! 👋
     
-    This tool performs **Matched Molecular Pair (MMP) analysis** to identify structural transformations that affect compound potency.
+    This enhanced tool performs **Matched Molecular Pair (MMP) analysis with multi-cut fragmentation** to identify complex structural transformations.
+    
+    ### New Multi-Cut Features:
+    1. **Multiple bond cuts**: Cut up to 5 bonds per molecule
+    2. **Complex fragmentation**: Identify transformations involving multiple R-groups
+    3. **Cut-level analysis**: Analyze transformations by fragmentation complexity
+    4. **Size filtering**: Control fragment sizes for meaningful analysis
+    
+    ### Key Improvements:
+    - **Better for complex molecules**: Can handle multi-point modifications
+    - **More comprehensive**: Identifies transformations missed by single-cut methods
+    - **Flexible analysis**: Control cut parameters for your specific needs
     
     ### How to use:
-    1. **Upload your data** using the sidebar on the left
-    2. **Configure parameters** like minimum transform occurrences
-    3. **View results** including top positive/negative transformations
-    4. **Export findings** for further analysis
+    1. **Upload your data** using the sidebar
+    2. **Configure fragmentation parameters** (max cuts, fragment sizes)
+    3. **Set analysis parameters** (minimum occurrences, etc.)
+    4. **View results** including cut-level analysis
+    5. **Export findings** for further analysis
     
-    ### Required CSV format:
-    Your CSV file should contain at least these columns:
-    - `SMILES`: Molecular structures in SMILES format
-    - `pIC50`: Potency values (negative log of IC50)
-    - `Name`: Compound names (optional but recommended)
-    
-    ### Example CSV format:
-    ```csv
-    SMILES,Name,pIC50
-    CC(=O)OC1=CC=CC=C1C(=O)O,aspirin,5.0
-    CN1C=NC2=C1C(=O)N(C(=O)N2C)C,caffeine,4.2
-    C1=CC=C(C=C1)C=O,benzaldehyde,3.8
-    ...
-    ```
-    
-    ### Key Logic:
-    - **Pairs are generated only when 3+ compounds share the same core**
-    - This reduces noise and focuses on statistically significant transformations
-    - Consistent with standard MMP analysis methodologies
-    
-    ### Troubleshooting:
-    If you encounter errors:
-    1. **NumPy compatibility**: Install `numpy<2` with `pip install "numpy<2"`
-    2. **Invalid SMILES**: Check your SMILES strings are valid
-    3. **Kekulization errors**: Disable "Kekulize molecules" in sidebar
-    
-    ### References:
-    - Hussain, J. & Rea, C. (2010). Computationally efficient algorithm to identify matched molecular pairs (MMPs) in large data sets. *Journal of Chemical Information and Modeling*, 50(3), 339-348. https://doi.org/10.1021/ci900450m
-    - Dossetter, A. G., Griffen, E. J., & Leach, A. G. (2013). Matched molecular pair analysis in drug discovery. *Drug Discovery Today*, 18(15-16), 724-731. https://doi.org/10.1016/j.drudis.2013.03.003
-    - Wassermann, A. M., Dimova, D., Iyer, P., & Bajorath, J., Advances in computational medicinal chemistry: matched molecular pair analysis. Drug Development Research, 73 (2012): 518-527. https://doi.org/10.1002/ddr.21045
-    - Tyrchan, Christian, and Emma Evertsson. "Matched molecular pair analysis in short: algorithms, applications and limitations," Computational and Structural Biotechnology Journal 15 (2017): 86-90 https://doi.org/10.1016/j.csbj.2016.12.003
+    ### Example Use Cases:
+    - **SAR analysis** of compounds with multiple substitution points
+    - **Scaffold hopping** with complex transformations
+    - **Multi-parameter optimization** studies
+    - **Fragment-based drug design**
     
     ⬅️ **Upload a CSV file in the sidebar to get started!**
     """)
@@ -903,14 +1024,7 @@ else:
 st.markdown("---")
 st.markdown("""
 <div style="text-align: center; color: #6B7280; font-size: 0.9rem;">
-    <p>MMP Analysis Tool v1.0 | Built with Streamlit, RDKit, and Pandas</p>
+    <p>MMP Analysis Tool v2.0 | Multi-Cut Support | Built with Streamlit and RDKit</p>
     <p>For research use only. Always validate computational predictions with experimental data.</p>
 </div>
 """, unsafe_allow_html=True)
-
-
-
-
-
-
-
