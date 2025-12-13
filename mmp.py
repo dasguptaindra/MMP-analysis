@@ -172,7 +172,6 @@ with st.sidebar:
         3. Calculate ΔpIC50 for each pair
         4. Identify frequently occurring transformations
         
-        **NEW:** Exact transformation display with highlighted changing regions
         """)
 
 # Helper functions (only define if RDKit is available)
@@ -1099,6 +1098,7 @@ st.markdown("""
     <p>For research use only. Always validate computational predictions with experimental data.</p>
 </div>
 """, unsafe_allow_html=True)
+
 
 
 
