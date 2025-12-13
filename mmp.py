@@ -130,6 +130,10 @@ with st.sidebar:
         This reduces noise and focuses on statistically significant transformations.
         """)
         
+        # Debug option
+        st.markdown("### 🐛 Debug")
+        show_debug_info = st.checkbox("Show debug information", value=False)
+        
         # Save options
         st.markdown("### 💾 Export")
         save_results = st.checkbox("Save results to Excel")
@@ -272,8 +276,8 @@ if RDKIT_AVAILABLE:
         
         return results
 
-    def perform_mmp_analysis(df, min_transform_occurrence):
-        """Perform MMP analysis matching the original logic"""
+    def perform_mmp_analysis(df, min_transform_occurrence, show_debug=False):
+        """Perform MMP analysis matching the original logic EXACTLY"""
         if df is None or len(df) == 0:
             return None, None
         
@@ -281,7 +285,7 @@ if RDKIT_AVAILABLE:
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # Step 1: Decompose molecules
+        # Step 1: Decompose molecules - EXACTLY as in original
         status_text.text("Step 1/4: Decomposing molecules...")
         progress_bar.progress(25)
         
@@ -321,59 +325,92 @@ if RDKIT_AVAILABLE:
             st.error("No valid fragments found")
             return None, None
         
+        # Create DataFrame with EXACT same column order as original
         row_df = pd.DataFrame(row_list, columns=["SMILES", "Core", "R_group", "Name", "pIC50"])
+        
+        if show_debug:
+            with st.expander("Debug: Row DataFrame", expanded=False):
+                st.write(f"Total rows: {len(row_df)}")
+                st.dataframe(row_df.head(20))
+                st.write("Unique cores:", row_df['Core'].nunique())
+                st.write("Sample cores:", row_df['Core'].head(10).tolist())
         
         if failed > 0:
             st.info(f"Successfully processed {successful} molecules, failed on {failed}")
         
-        # Step 2: Collect pairs - KEY CHANGE: Using len(v) > 2 (not > 1)
+        # Step 2: Collect pairs - MATCHING ORIGINAL EXACTLY
         status_text.text("Step 2/4: Collecting molecular pairs...")
         progress_bar.progress(50)
         
         delta_list = []
+        cores_with_pairs = 0
+        total_combinations = 0
         
         # Group by Core and iterate through each group
         for k, v in row_df.groupby("Core"):
-            # KEY CHANGE: Only process groups with more than 2 compounds (matching original logic)
+            # CRITICAL: Only process groups with more than 2 compounds (matches original)
             if len(v) > 2:
+                cores_with_pairs += 1
                 # Generate all unique combinations of indices
-                for a, b in combinations(range(0, len(v)), 2):
+                combinations_list = list(combinations(range(0, len(v)), 2))
+                total_combinations += len(combinations_list)
+                
+                for a, b in combinations_list:
                     reagent_a = v.iloc[a]
                     reagent_b = v.iloc[b]
                     
-                    # Skip if same molecule
+                    # Skip if same molecule (shouldn't happen with combinations but check anyway)
                     if reagent_a.SMILES == reagent_b.SMILES:
                         continue
                     
-                    # Sort by SMILES for canonical ordering (matching original)
+                    # Sort by SMILES for canonical ordering (matches original)
                     reagent_a, reagent_b = sorted([reagent_a, reagent_b], key=lambda x: x.SMILES)
                     
                     # Calculate delta
                     delta = reagent_b.pIC50 - reagent_a.pIC50
                     
-                    # Create transform string - ensure proper formatting with *-
-                    transform_str = f"{reagent_a.R_group.replace('*', '*-')}>>{reagent_b.R_group.replace('*', '*-')}"
+                    # Create transform string - MATCH ORIGINAL FORMAT EXACTLY
+                    # Note: The replace('*','*-') is critical
+                    transform_str = f"{reagent_a.R_group.replace('*','*-')}>>{reagent_b.R_group.replace('*','*-')}"
                     
-                    # Append to delta_list - matching original format exactly
+                    # CRITICAL: Create the list in EXACT same order as original
+                    # Original code: list(reagent_a.values) + list(reagent_b.values) + [transform_str, delta]
                     delta_list.append([
                         reagent_a.SMILES, reagent_a.Core, reagent_a.R_group, reagent_a.Name, reagent_a.pIC50,
                         reagent_b.SMILES, reagent_b.Core, reagent_b.R_group, reagent_b.Name, reagent_b.pIC50,
                         transform_str, delta
                     ])
         
+        if show_debug:
+            with st.expander("Debug: Pair Generation", expanded=False):
+                st.write(f"Cores with >2 compounds: {cores_with_pairs}")
+                st.write(f"Total possible combinations: {total_combinations}")
+                st.write(f"Actual pairs generated: {len(delta_list)}")
+                if delta_list:
+                    st.write("First 3 pairs:")
+                    for i, pair in enumerate(delta_list[:3]):
+                        st.write(f"Pair {i+1}: {pair[:5]} ... {pair[5:10]} ... Δ={pair[-1]:.3f}")
+        
         if not delta_list:
             st.error("No molecular pairs found")
             return None, None
         
-        # Create DataFrame with matching column names
+        # Create DataFrame with EXACT same column names as expected
         cols = [
             "SMILES_1", "Core_1", "R_group_1", "Name_1", "pIC50_1",
-            "SMILES_2", "Core_2", "Rgroup_2", "Name_2", "pIC50_2",
+            "SMILES_2", "Core_2", "R_group_2", "Name_2", "pIC50_2",
             "Transform", "Delta"
         ]
         delta_df = pd.DataFrame(delta_list, columns=cols)
         
-        # Step 3: Collect frequent transforms
+        if show_debug:
+            with st.expander("Debug: Delta DataFrame", expanded=False):
+                st.write(f"Delta DataFrame shape: {delta_df.shape}")
+                st.dataframe(delta_df.head(10))
+                st.write("Column names:", delta_df.columns.tolist())
+                st.write("Unique transforms:", delta_df['Transform'].nunique())
+        
+        # Step 3: Collect frequent transforms - MATCHING ORIGINAL
         status_text.text("Step 3/4: Analyzing transformations...")
         progress_bar.progress(75)
         
@@ -382,6 +419,15 @@ if RDKIT_AVAILABLE:
             # Only include transforms with minimum occurrences
             if len(v) >= min_transform_occurrence:
                 mmp_list.append([k, len(v), v.Delta.values])
+        
+        if show_debug:
+            with st.expander("Debug: Transform Collection", expanded=False):
+                st.write(f"Total unique transforms: {delta_df['Transform'].nunique()}")
+                st.write(f"Transforms with >= {min_transform_occurrence} occurrences: {len(mmp_list)}")
+                if mmp_list:
+                    st.write("First 5 transforms:")
+                    for i, transform in enumerate(mmp_list[:5]):
+                        st.write(f"Transform {i+1}: {transform[0]} - Count: {transform[1]}")
         
         if not mmp_list:
             st.warning(f"No transforms found with {min_transform_occurrence}+ occurrences")
@@ -392,21 +438,21 @@ if RDKIT_AVAILABLE:
         mmp_df['idx'] = range(0, len(mmp_df))
         mmp_df['mean_delta'] = [x.mean() for x in mmp_df.Deltas]
         
-        # Create reaction molecules with error handling
+        # Create reaction molecules with error handling - MATCH ORIGINAL
         rxn_mols = []
         for transform in mmp_df['Transform']:
             try:
-                # Try to create reaction from SMARTS
-                rxn = AllChem.ReactionFromSmarts(transform.replace('*-', '*'), useSmiles=True)
+                # IMPORTANT: Use the same SMARTS conversion as original
+                # Note: replace('*-','*') reverses the earlier replace('*','*-')
+                rxn = AllChem.ReactionFromSmarts(transform.replace('*-','*'), useSmiles=True)
                 rxn_mols.append(rxn)
             except Exception as e:
                 # If that fails, try alternative approach
                 try:
-                    # Try with different formatting
                     parts = transform.split('>>')
                     if len(parts) == 2:
-                        left = parts[0].replace('*-', '*')
-                        right = parts[1].replace('*-', '*')
+                        left = parts[0].replace('*-','*')
+                        right = parts[1].replace('*-','*')
                         rxn_smarts = f"{left}>>{right}"
                         rxn = AllChem.ReactionFromSmarts(rxn_smarts, useSmiles=True)
                         rxn_mols.append(rxn)
@@ -494,6 +540,46 @@ if RDKIT_AVAILABLE:
                 except:
                     st.write(f"{name}: {smiles}")
 
+    def original_approach_simulation(row_df, show_debug=False):
+        """Simulate the original approach for comparison"""
+        original_delta_list = []
+        
+        for k, v in row_df.groupby("Core"):
+            if len(v) > 2:
+                for a, b in combinations(range(0, len(v)), 2):
+                    reagent_a = v.iloc[a]
+                    reagent_b = v.iloc[b]
+                    
+                    if reagent_a.SMILES == reagent_b.SMILES:
+                        continue
+                    
+                    reagent_a, reagent_b = sorted([reagent_a, reagent_b], key=lambda x: x.SMILES)
+                    
+                    delta = reagent_b.pIC50 - reagent_a.pIC50
+                    
+                    # EXACTLY as in the original code snippet
+                    original_delta_list.append(
+                        list(reagent_a.values) + 
+                        list(reagent_b.values) +
+                        [f"{reagent_a.R_group.replace('*','*-')}>>{reagent_b.R_group.replace('*','*-')}", delta]
+                    )
+        
+        if original_delta_list:
+            cols = [
+                "SMILES_1", "Core_1", "R_group_1", "Name_1", "pIC50_1",
+                "SMILES_2", "Core_2", "R_group_2", "Name_2", "pIC50_2",
+                "Transform", "Delta"
+            ]
+            original_df = pd.DataFrame(original_delta_list, columns=cols)
+            
+            if show_debug:
+                with st.expander("Debug: Original Approach", expanded=False):
+                    st.write(f"Original approach pairs: {len(original_df)}")
+                    st.dataframe(original_df.head(10))
+            
+            return original_df
+        return None
+
 # Main app logic
 if not RDKIT_AVAILABLE:
     st.error("""
@@ -539,6 +625,7 @@ elif uploaded_file is not None:
     # Get parameters from sidebar
     sanitize = sanitize_molecules
     kekulize = kekulize_molecules
+    show_debug = show_debug_info if 'show_debug_info' in locals() else False
     
     # Load data
     df = load_data(uploaded_file, sanitize=sanitize, kekulize=kekulize)
@@ -557,13 +644,43 @@ elif uploaded_file is not None:
         # Perform MMP analysis
         st.markdown('<h2 class="section-header">🔍 MMP Analysis Results</h2>', unsafe_allow_html=True)
         
-        delta_df, mmp_df = perform_mmp_analysis(df, min_occurrence)
+        delta_df, mmp_df = perform_mmp_analysis(df, min_occurrence, show_debug)
         
         if delta_df is not None:
             # Show statistics
             st.success("Analysis complete!")
             col1, col2, col3 = st.columns(3)
             col1.metric("Total Pairs Generated", len(delta_df))
+            
+            # Optional: Compare with original approach
+            if show_debug and 'row_df' in locals():
+                original_df = original_approach_simulation(row_df, show_debug)
+                if original_df is not None:
+                    comparison_col1, comparison_col2 = st.columns(2)
+                    with comparison_col1:
+                        st.info(f"Current approach pairs: {len(delta_df)}")
+                        st.dataframe(delta_df[['SMILES_1', 'SMILES_2', 'Transform', 'Delta']].head(5))
+                    
+                    with comparison_col2:
+                        st.info(f"Original approach pairs: {len(original_df)}")
+                        st.dataframe(original_df[['SMILES_1', 'SMILES_2', 'Transform', 'Delta']].head(5))
+                    
+                    # Check if identical
+                    delta_df_sorted = delta_df.sort_values(['SMILES_1', 'SMILES_2']).reset_index(drop=True)
+                    original_df_sorted = original_df.sort_values(['SMILES_1', 'SMILES_2']).reset_index(drop=True)
+                    
+                    if delta_df_sorted.equals(original_df_sorted):
+                        st.success("✅ Both approaches give identical results!")
+                    else:
+                        st.warning("⚠️ Approaches differ!")
+                        # Show differences
+                        diff_mask = ~delta_df_sorted['Transform'].eq(original_df_sorted['Transform'])
+                        if diff_mask.any():
+                            st.write("Different transforms:")
+                            st.dataframe(pd.DataFrame({
+                                'Current': delta_df_sorted.loc[diff_mask, 'Transform'].values,
+                                'Original': original_df_sorted.loc[diff_mask, 'Transform'].values
+                            }))
             
             if mmp_df is not None:
                 col2.metric("Unique Transforms", len(mmp_df))
@@ -792,4 +909,3 @@ st.markdown("""
     <p>For research use only. Always validate computational predictions with experimental data.</p>
 </div>
 """, unsafe_allow_html=True)
-
