@@ -6,4 +6,5 @@ seaborn
 matplotlib
 pillow
 plotly
+openpyxl
 
