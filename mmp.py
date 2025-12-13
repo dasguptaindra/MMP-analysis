@@ -13,14 +13,17 @@ import tempfile
 import os
 import sys
 import subprocess
+import itertools
 
 # Try to import RDKit with error handling
 try:
     from rdkit import Chem
-    from rdkit.Chem import AllChem, Draw
-    from rdkit.Chem.Draw import rdMolDraw2D
-    from rdkit.Chem import rdDepictor
+    from rdkit.Chem import AllChem, Draw, rdDepictor
+    from rdkit.Chem.Draw import rdMolDraw2D, MolsToGridImage
     from rdkit.Chem.Scaffolds import MurckoScaffold
+    from rdkit.Chem import rdFMCS
+    from rdkit.Chem.rdMMPA import FragmentMol
+    from rdkit.Chem.rdRGroupDecomposition import RGroupDecompose
     rdDepictor.SetPreferCoordGen(True)
     RDKIT_AVAILABLE = True
 except ImportError as e:
@@ -29,16 +32,16 @@ except ImportError as e:
 
 # Set page config
 st.set_page_config(
-    page_title="MMP Analysis",
+    page_title="MMP Analysis & Scaffold Finder",
     page_icon="🧪",
     layout="wide"
 )
 
 # Title
-st.title("🧪 Matched Molecular Pair (MMP) Analysis")
+st.title("🧪 Matched Molecular Pair (MMP) Analysis & Scaffold Finder")
 st.markdown("""
 This app performs Matched Molecular Pair analysis to identify structural transformations 
-that influence compound potency (pIC50 values).
+that influence compound potency (pIC50 values) and finds common scaffolds in your dataset.
 """)
 
 # Check if RDKit is available
@@ -61,280 +64,8 @@ if not RDKIT_AVAILABLE:
     st.stop()
 
 # ============================================================================
-# FUNCTION DEFINITIONS
+# FUNCTION DEFINITIONS (UPDATED WITH SCAFFOLD FINDER)
 # ============================================================================
-
-def remove_map_nums(mol):
-    """Remove atom map numbers from a molecule"""
-    for atm in mol.GetAtoms():
-        atm.SetAtomMapNum(0)
-    return mol
-
-def sort_fragments(mol):
-    """
-    Transform a molecule with multiple fragments into a list of molecules 
-    that is sorted by number of atoms from largest to smallest
-    """
-    frag_list = list(Chem.GetMolFrags(mol, asMols=True))
-    frag_list = [remove_map_nums(x) for x in frag_list]
-    frag_num_atoms_list = [(x.GetNumAtoms(), x) for x in frag_list]
-    frag_num_atoms_list.sort(key=itemgetter(0), reverse=True)
-    return [x[1] for x in frag_num_atoms_list]
-
-def get_mmp_fragments_simple(mol):
-    """Simple fragmentation method using common attachment points"""
-    fragments = []
-    
-    try:
-        # Convert to SMILES and look for common attachment patterns
-        smiles = Chem.MolToSmiles(mol)
-        
-        # Try to fragment at common positions using SMARTS
-        # Pattern for aromatic carbon with substituent
-        aromatic_pattern = Chem.MolFromSmarts('[c;H1]')
-        
-        # Pattern for aliphatic carbon with substituent
-        aliphatic_pattern = Chem.MolFromSmarts('[C;H2]')
-        
-        # Pattern for nitrogen with substituent
-        nitrogen_pattern = Chem.MolFromSmarts('[N;H2]')
-        
-        patterns = [aromatic_pattern, aliphatic_pattern, nitrogen_pattern]
-        pattern_names = ['aromatic', 'aliphatic', 'nitrogen']
-        
-        for pattern, name in zip(patterns, pattern_names):
-            if pattern:
-                matches = mol.GetSubstructMatches(pattern)
-                for match in matches:
-                    if len(match) > 0:
-                        atom_idx = match[0]
-                        
-                        # Create a modified molecule with wildcard
-                        mol_copy = Chem.RWMol(mol)
-                        
-                        # Get the atom
-                        atom = mol_copy.GetAtomWithIdx(atom_idx)
-                        
-                        # Create scaffold: replace the atom with wildcard
-                        wildcard = Chem.Atom(0)  # Wildcard atom
-                        wildcard.SetAtomMapNum(1)
-                        mol_copy.ReplaceAtom(atom_idx, wildcard)
-                        
-                        # Create substituent: extract the atom and its neighbors
-                        substituent_mol = Chem.RWMol()
-                        
-                        # Add the atom with wildcard
-                        sub_atom = Chem.Atom(atom.GetAtomicNum())
-                        sub_atom.SetAtomMapNum(2)
-                        sub_idx = substituent_mol.AddAtom(sub_atom)
-                        
-                        # Add the atom's neighbors (except hydrogens)
-                        atom_map = {atom_idx: sub_idx}
-                        for neighbor in atom.GetNeighbors():
-                            if neighbor.GetAtomicNum() != 1:  # Skip hydrogens
-                                new_atom = Chem.Atom(neighbor.GetAtomicNum())
-                                new_idx = substituent_mol.AddAtom(new_atom)
-                                atom_map[neighbor.GetIdx()] = new_idx
-                                
-                                # Add bond
-                                bond_type = mol.GetBondBetweenAtoms(atom_idx, neighbor.GetIdx()).GetBondType()
-                                substituent_mol.AddBond(sub_idx, new_idx, bond_type)
-                        
-                        # Clean up molecules
-                        try:
-                            scaffold = mol_copy.GetMol()
-                            substituent = substituent_mol.GetMol()
-                            
-                            Chem.SanitizeMol(scaffold)
-                            Chem.SanitizeMol(substituent)
-                            
-                            fragments.append((scaffold, substituent))
-                        except:
-                            continue
-        
-        # If no fragments found with patterns, try a simpler approach
-        if not fragments:
-            # Just split at the first non-ring single bond
-            for bond in mol.GetBonds():
-                if bond.GetBondType() == Chem.rdchem.BondType.SINGLE:
-                    a1 = bond.GetBeginAtom()
-                    a2 = bond.GetEndAtom()
-                    
-                    # Create fragments by breaking this bond
-                    mol_copy = Chem.RWMol(mol)
-                    
-                    # Replace both atoms with wildcards
-                    a1_idx = bond.GetBeginAtomIdx()
-                    a2_idx = bond.GetEndAtomIdx()
-                    
-                    wildcard1 = Chem.Atom(0)
-                    wildcard1.SetAtomMapNum(1)
-                    mol_copy.ReplaceAtom(a1_idx, wildcard1)
-                    
-                    wildcard2 = Chem.Atom(0)
-                    wildcard2.SetAtomMapNum(2)
-                    mol_copy.ReplaceAtom(a2_idx, wildcard2)
-                    
-                    try:
-                        scaffold = mol_copy.GetMol()
-                        Chem.SanitizeMol(scaffold)
-                        
-                        # Create substituent as just a wildcard
-                        substituent = Chem.MolFromSmiles('*')
-                        substituent.GetAtomWithIdx(0).SetAtomMapNum(2)
-                        
-                        fragments.append((scaffold, substituent))
-                    except:
-                        continue
-        
-        # Remove duplicates
-        unique_fragments = []
-        seen = set()
-        for scaffold, substituent in fragments:
-            scaffold_smiles = Chem.MolToSmiles(scaffold)
-            substituent_smiles = Chem.MolToSmiles(substituent)
-            key = (scaffold_smiles, substituent_smiles)
-            if key not in seen:
-                seen.add(key)
-                unique_fragments.append((scaffold, substituent))
-        
-        return unique_fragments
-    
-    except Exception as e:
-        st.warning(f"Fragmentation error: {e}")
-        return []
-
-def get_murcko_fragments(mol):
-    """Use RDKit's Murcko scaffold decomposition"""
-    try:
-        # Get Murcko scaffold
-        scaffold = MurckoScaffold.GetScaffoldForMol(mol)
-        
-        # Get sidechains by removing scaffold from molecule
-        scaffold_atoms = set(scaffold.GetAtoms())
-        mol_atoms = set(mol.GetAtoms())
-        
-        # Find atoms that are not in scaffold
-        sidechain_atoms = mol_atoms - scaffold_atoms
-        
-        if len(sidechain_atoms) > 0:
-            # Create sidechain molecule
-            sidechain_mol = Chem.RWMol()
-            atom_map = {}
-            
-            # Add sidechain atoms
-            for atom in sidechain_atoms:
-                new_atom = Chem.Atom(atom.GetAtomicNum())
-                new_idx = sidechain_mol.AddAtom(new_atom)
-                atom_map[atom.GetIdx()] = new_idx
-            
-            # Add bonds between sidechain atoms
-            for atom in sidechain_atoms:
-                for neighbor in atom.GetNeighbors():
-                    if neighbor in sidechain_atoms:
-                        bond = mol.GetBondBetweenAtoms(atom.GetIdx(), neighbor.GetIdx())
-                        if bond and atom.GetIdx() < neighbor.GetIdx():
-                            sidechain_mol.AddBond(
-                                atom_map[atom.GetIdx()],
-                                atom_map[neighbor.GetIdx()],
-                                bond.GetBondType()
-                            )
-            
-            # Add attachment point wildcards
-            scaffold_with_wildcard = Chem.RWMol(scaffold)
-            for atom in scaffold.GetAtoms():
-                for neighbor in atom.GetNeighbors():
-                    if neighbor in sidechain_atoms:
-                        # Replace with wildcard in scaffold
-                        wildcard = Chem.Atom(0)
-                        wildcard.SetAtomMapNum(1)
-                        scaffold_with_wildcard.ReplaceAtom(atom.GetIdx(), wildcard)
-                        
-                        # Add wildcard to sidechain
-                        sidechain_atom = sidechain_mol.GetAtomWithIdx(atom_map[neighbor.GetIdx()])
-                        sidechain_atom.SetAtomMapNum(2)
-            
-            try:
-                scaffold_final = scaffold_with_wildcard.GetMol()
-                sidechain_final = sidechain_mol.GetMol()
-                Chem.SanitizeMol(scaffold_final)
-                Chem.SanitizeMol(sidechain_final)
-                return [(scaffold_final, sidechain_final)]
-            except:
-                return []
-        
-        return []
-    
-    except Exception as e:
-        st.warning(f"Murcko fragmentation error: {e}")
-        return []
-
-def get_simple_substituents(mol):
-    """Extract common substituents from molecules"""
-    fragments = []
-    
-    try:
-        # Common substituent patterns
-        substituents = [
-            ('[CH3]', 'Methyl'),
-            ('[OH]', 'Hydroxy'),
-            ('[NH2]', 'Amino'),
-            ('[F]', 'Fluoro'),
-            ('[Cl]', 'Chloro'),
-            ('[Br]', 'Bromo'),
-            ('[I]', 'Iodo'),
-            ('[OCH3]', 'Methoxy'),
-            ('[N+]', 'Ammonium'),
-            ('[C=O]', 'Carbonyl'),
-        ]
-        
-        for sub_smarts, name in substituents:
-            pattern = Chem.MolFromSmarts(sub_smarts)
-            if pattern:
-                matches = mol.GetSubstructMatches(pattern)
-                for match in matches:
-                    if len(match) > 0:
-                        # Create scaffold by removing this substituent
-                        scaffold_mol = Chem.RWMol(mol)
-                        
-                        # Remove the matched atoms
-                        for atom_idx in sorted(match, reverse=True):
-                            try:
-                                scaffold_mol.RemoveAtom(atom_idx)
-                            except:
-                                pass
-                        
-                        # Add wildcard at attachment point
-                        if scaffold_mol.GetNumAtoms() > 0:
-                            # Create substituent as the pattern with wildcard
-                            substituent_mol = Chem.MolFromSmiles(sub_smarts.replace('[', '').replace(']', ''))
-                            if substituent_mol:
-                                # Add wildcard
-                                for atom in substituent_mol.GetAtoms():
-                                    if atom.GetDegree() == 1:  # Terminal atom
-                                        atom.SetAtomMapNum(2)
-                                        break
-                                
-                                # Add wildcard to scaffold
-                                for atom in scaffold_mol.GetAtoms():
-                                    if atom.GetDegree() < atom.GetExplicitValence():
-                                        atom.SetAtomMapNum(1)
-                                        break
-                                
-                                try:
-                                    scaffold = scaffold_mol.GetMol()
-                                    substituent = substituent_mol
-                                    Chem.SanitizeMol(scaffold)
-                                    Chem.SanitizeMol(substituent)
-                                    fragments.append((scaffold, substituent))
-                                except:
-                                    continue
-        
-        return fragments
-    
-    except Exception as e:
-        st.warning(f"Simple substituent error: {e}")
-        return []
 
 def get_largest_fragment(mol):
     """Get the largest fragment from a molecule"""
@@ -346,11 +77,171 @@ def get_largest_fragment(mol):
     except:
         return mol
 
+def cleanup_fragment(mol):
+    """
+    Replace atom map numbers with Hydrogens
+    :param mol: input molecule
+    :return: modified molecule, number of R-groups
+    """
+    rgroup_count = 0
+    for atm in mol.GetAtoms():
+        atm.SetAtomMapNum(0)
+        if atm.GetAtomicNum() == 0:
+            rgroup_count += 1
+            atm.SetAtomicNum(1)
+    mol = Chem.RemoveAllHs(mol)
+    return mol, rgroup_count
+
+def generate_fragments(mol, min_fraction=0.67):
+    """
+    Generate fragments using the RDKit's FragmentMol function
+    :param mol: RDKit molecule
+    :param min_fraction: minimum fraction of atoms to keep (0-1)
+    :return: a Pandas dataframe with Scaffold SMILES, Number of Atoms, Number of R-Groups
+    """
+    # Generate molecule fragments
+    frag_list = FragmentMol(mol)
+    # Flatten the output into a single list
+    flat_frag_list = [x for x in itertools.chain(*frag_list) if x]
+    # The output of Fragment mol is contained in single molecules.  
+    # Extract the largest fragment from each molecule
+    flat_frag_list = [get_largest_fragment(x) for x in flat_frag_list]
+    # Keep fragments where the number of atoms in the fragment is at least 
+    # min_fraction of the number of atoms in input molecule
+    num_mol_atoms = mol.GetNumAtoms()
+    flat_frag_list = [x for x in flat_frag_list if x.GetNumAtoms() / num_mol_atoms > min_fraction]
+    # Remove atom map numbers from the fragments
+    flat_frag_list = [cleanup_fragment(x) for x in flat_frag_list]
+    # Convert fragments to SMILES
+    frag_smiles_list = [[Chem.MolToSmiles(x), x.GetNumAtoms(), y] for (x, y) in flat_frag_list]
+    # Add the input molecule to the fragment list
+    frag_smiles_list.append([Chem.MolToSmiles(mol), mol.GetNumAtoms(), 1])
+    # Put the results into a Pandas dataframe
+    frag_df = pd.DataFrame(frag_smiles_list, columns=["Scaffold", "NumAtoms", "NumRgroups"])
+    # Remove duplicate fragments
+    frag_df = frag_df.drop_duplicates("Scaffold")
+    return frag_df
+
+def find_scaffolds(df_in, progress_callback=None):
+    """
+    Generate scaffolds for a set of molecules
+    :param df_in: Pandas dataframe with [SMILES, Name, RDKit molecule] columns
+    :param progress_callback: function to update progress (optional)
+    :return: dataframe with molecules and scaffolds, dataframe with unique scaffolds
+    """
+    # Loop over molecules and generate fragments
+    df_list = []
+    total_molecules = len(df_in)
+    
+    for idx, (smiles, name, mol) in enumerate(df_in[["SMILES", "Name", "mol"]].values):
+        try:
+            tmp_df = generate_fragments(mol).copy()
+            tmp_df['Name'] = name
+            tmp_df['SMILES'] = smiles
+            tmp_df['Mol'] = [mol] * len(tmp_df)  # Store the molecule for later use
+            df_list.append(tmp_df)
+        except Exception as e:
+            st.warning(f"Error processing molecule {name}: {e}")
+        
+        # Update progress if callback provided
+        if progress_callback:
+            progress_callback((idx + 1) / total_molecules)
+    
+    # Combine the list of dataframes into a single dataframe
+    if df_list:
+        mol_df = pd.concat(df_list, ignore_index=True)
+    else:
+        return pd.DataFrame(), pd.DataFrame()
+    
+    # Collect scaffolds
+    scaffold_list = []
+    for scaffold, group in mol_df.groupby("Scaffold"):
+        unique_names = group['Name'].nunique()
+        num_atoms = group['NumAtoms'].iloc[0]
+        num_rgroups = group['NumRgroups'].iloc[0]
+        
+        # Get example molecules for this scaffold
+        example_molecules = group['Mol'].iloc[:3].tolist()
+        
+        scaffold_list.append([scaffold, unique_names, num_atoms, num_rgroups, example_molecules])
+    
+    scaffold_df = pd.DataFrame(scaffold_list, 
+                              columns=["Scaffold", "Count", "NumAtoms", "NumRgroups", "ExampleMolecules"])
+    
+    # Any fragment that occurs more times than the number of fragments can't be a scaffold
+    # (Actually, we want to keep all fragments for MMP analysis)
+    # Sort scaffolds by frequency and size
+    scaffold_df = scaffold_df.sort_values(["Count", "NumAtoms"], ascending=[False, False])
+    
+    return mol_df, scaffold_df
+
+def get_molecules_with_scaffold(scaffold, mol_df, activity_df):
+    """
+    Associate molecules with scaffolds using R-group decomposition
+    :param scaffold: scaffold SMILES
+    :param mol_df: dataframe with molecules and scaffolds
+    :param activity_df: dataframe with [SMILES, Name, pIC50] columns
+    :return: list of core(s) with R-groups labeled, dataframe with [SMILES, Name, pIC50, mol]
+    """
+    # Find molecules that contain this scaffold
+    match_df = mol_df.query("Scaffold == @scaffold")
+    
+    if len(match_df) == 0:
+        return [], pd.DataFrame()
+    
+    # Merge with activity data
+    merge_df = match_df.merge(activity_df, on=["SMILES", "Name"])
+    
+    if len(merge_df) == 0:
+        return [], pd.DataFrame()
+    
+    # Create scaffold molecule
+    scaffold_mol = Chem.MolFromSmiles(scaffold)
+    
+    if scaffold_mol is None:
+        return [], merge_df[["SMILES", "Name", "pIC50", "Mol"]]
+    
+    # Perform R-group decomposition
+    try:
+        # Prepare molecules for R-group decomposition
+        molecules = []
+        valid_indices = []
+        
+        for idx, mol in enumerate(merge_df['Mol']):
+            if mol is not None:
+                molecules.append(mol)
+                valid_indices.append(idx)
+        
+        if molecules:
+            rgroup_match, rgroup_miss = RGroupDecompose([scaffold_mol], molecules, asSmiles=True)
+            
+            if len(rgroup_match):
+                rgroup_df = pd.DataFrame(rgroup_match)
+                
+                # Extract R-group information
+                rgroup_columns = [col for col in rgroup_df.columns if col.startswith('R')]
+                
+                # Add SMILES and names back
+                for i, idx in enumerate(valid_indices):
+                    if i < len(rgroup_df):
+                        rgroup_df.loc[i, 'SMILES'] = merge_df.iloc[idx]['SMILES']
+                        rgroup_df.loc[i, 'Name'] = merge_df.iloc[idx]['Name']
+                        rgroup_df.loc[i, 'pIC50'] = merge_df.iloc[idx]['pIC50']
+                
+                # Get unique cores
+                unique_cores = rgroup_df['Core'].unique()
+                
+                return unique_cores, rgroup_df
+    except Exception as e:
+        st.warning(f"R-group decomposition error: {e}")
+    
+    # Fallback: return basic info
+    return [], merge_df[["SMILES", "Name", "pIC50", "Mol"]]
+
 def highlight_common_scaffold(mol1, mol2, highlight_color=(0.8, 0.8, 0.8, 0.6)):
     """Highlight the common scaffold between two molecules"""
     try:
         # Find maximum common substructure
-        from rdkit.Chem import rdFMCS
         mcs_result = rdFMCS.FindMCS([mol1, mol2], timeout=60)
         
         if mcs_result.numAtoms > 0:
@@ -374,22 +265,15 @@ def highlight_common_scaffold(mol1, mol2, highlight_color=(0.8, 0.8, 0.8, 0.6)):
 def draw_molecule_pair(mol1, mol2, name1="Compound 1", name2="Compound 2", 
                       pIC50_1=None, pIC50_2=None, highlight_core=True, size=(300, 300)):
     """Draw two molecules side by side with highlighting"""
-    from rdkit.Chem.Draw import MolsToGridImage
     
     # Prepare molecules for display
     mols = [mol1, mol2]
     
     # Highlight common core if requested
     highlight_atoms = []
-    highlight_bonds = []
     
     if highlight_core and mol1 and mol2:
         atoms1, atoms2 = highlight_common_scaffold(mol1, mol2)
-        
-        # Create highlight colors
-        colors1 = [(0.8, 0.8, 0.8, 0.6)] * len(atoms1) if atoms1 else []
-        colors2 = [(0.8, 0.8, 0.8, 0.6)] * len(atoms2) if atoms2 else []
-        
         highlight_atoms = [atoms1, atoms2]
     
     # Create labels
@@ -404,8 +288,7 @@ def draw_molecule_pair(mol1, mol2, name1="Compound 1", name2="Compound 2",
     try:
         img = MolsToGridImage(mols, molsPerRow=2, subImgSize=size,
                              legends=labels,
-                             highlightAtomLists=highlight_atoms if highlight_atoms else None,
-                             highlightBondLists=highlight_bonds if highlight_bonds else None)
+                             highlightAtomLists=highlight_atoms if highlight_atoms else None)
         return img
     except:
         # Fallback to simple drawing
@@ -413,8 +296,7 @@ def draw_molecule_pair(mol1, mol2, name1="Compound 1", name2="Compound 2",
         return img
 
 def parse_transform_to_smiles(transform_str):
-    """Convert a transformation string like C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.F.N.O.O.O.O.S>>C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.N.N.O.O.O.O.S.S 
-    to proper SMILES notation."""
+    """Convert a transformation string to proper SMILES notation."""
     
     if '>>' not in transform_str:
         return None, None, None
@@ -444,8 +326,6 @@ def parse_transform_to_smiles(transform_str):
         # Create reactant molecule: core + R-groups
         reactant_full = common_core
         if reactant_r_groups:
-            # Try to create a proper molecule with attachment points
-            # For simplicity, we'll just combine with dots
             reactant_full = f"{common_core}.{'.'.join(reactant_r_groups)}"
         
         # Create product molecule: core + R-groups
@@ -454,7 +334,6 @@ def parse_transform_to_smiles(transform_str):
             product_full = f"{common_core}.{'.'.join(product_r_groups)}"
         
         # Create simplified transformation
-        # Extract just the changing parts
         reactant_simple = '.'.join(reactant_r_groups) if reactant_r_groups else "*"
         product_simple = '.'.join(product_r_groups) if product_r_groups else "*"
         
@@ -463,8 +342,7 @@ def parse_transform_to_smiles(transform_str):
     # If no common fragments found, use the full strings
     return reactant_str, product_str, transform_str
 
-def visualize_transformation_enhanced(transform_str, compounds_df=None, 
-                                     example_compounds=None, size=(400, 200)):
+def visualize_transformation_enhanced(transform_str, size=(400, 200)):
     """Create an enhanced visualization of the transformation with proper chemical structures"""
     
     # Try to parse the transformation to proper SMILES
@@ -477,9 +355,6 @@ def visualize_transformation_enhanced(transform_str, compounds_df=None,
         
         if reactant_mol and product_mol:
             # Both molecules are valid - draw them side by side
-            from rdkit.Chem.Draw import MolsToGridImage
-            
-            # Prepare molecules for display
             mols = [reactant_mol, product_mol]
             legends = ["Reactant (Before)", "Product (After)"]
             
@@ -490,7 +365,6 @@ def visualize_transformation_enhanced(transform_str, compounds_df=None,
         
         elif reactant_mol or product_mol:
             # Only one is valid
-            from rdkit.Chem.Draw import MolsToGridImage
             valid_mols = []
             valid_legends = []
             
@@ -574,28 +448,6 @@ def create_text_visualization(text, size):
         y_offset += 20
     
     return img
-
-def rxn_to_image(rxn_smarts, width=300, height=150):
-    """Convert reaction SMARTS to PIL Image"""
-    try:
-        return visualize_transformation_enhanced(rxn_smarts, size=(width, height))
-    except:
-        # Fallback
-        from PIL import Image, ImageDraw
-        img = Image.new('RGB', (width, height), color='white')
-        draw = ImageDraw.Draw(img)
-        draw.text((10, height//2 - 10), str(rxn_smarts)[:50], fill='black')
-        return img
-
-def mol_to_image(mol, width=200, height=200):
-    """Convert RDKit molecule to PIL Image"""
-    try:
-        img = Draw.MolToImage(mol, size=(width, height))
-        return img
-    except:
-        # Create a placeholder image
-        img = Image.new('RGB', (width, height), color='white')
-        return img
 
 def create_stripplot(deltas, figsize=(4, 1.5)):
     """Create a stripplot for delta distribution"""
@@ -820,8 +672,8 @@ def display_transformation_with_examples(transform_str, delta_df, compounds_df,
     
     return example_pairs
 
-def run_mmp_analysis(df, min_occurrences=2):
-    """Main MMP analysis pipeline"""
+def run_scaffold_analysis(df, min_scaffold_count=2, min_fraction=0.67):
+    """Run scaffold analysis using the improved scaffold finder"""
     
     # Process molecules
     df['mol'] = df['SMILES'].apply(Chem.MolFromSmiles)
@@ -829,162 +681,112 @@ def run_mmp_analysis(df, min_occurrences=2):
     
     if len(valid_df) == 0:
         st.error("No valid molecules found in the dataset.")
-        return None, None, None, None
+        return None, None
     
     st.info(f"✅ Found {len(valid_df)} valid molecules out of {len(df)} total.")
     
-    # Display all compounds
-    if show_molecules:
-        with st.expander("📋 View All Compounds", expanded=False):
-            st.subheader("All Compounds in Dataset")
-            
-            # Create tabs for different views
-            tab_view1, tab_view2 = st.tabs(["Grid View", "Table View"])
-            
-            with tab_view1:
-                # Display as grid of molecules
-                n_cols = 4
-                for i in range(0, len(valid_df), n_cols):
-                    cols = st.columns(n_cols)
-                    for j in range(n_cols):
-                        idx = i + j
-                        if idx < len(valid_df):
-                            with cols[j]:
-                                row = valid_df.iloc[idx]
-                                mol = row['mol']
-                                if mol:
-                                    img = Draw.MolToImage(mol, size=(200, 200))
-                                    st.image(img, caption=f"{row['Name']}\npIC50: {row['pIC50']:.2f}")
-            
-            with tab_view2:
-                # Display as table with SMILES
-                display_df = valid_df[['Name', 'SMILES', 'pIC50']].copy()
-                st.dataframe(display_df, use_container_width=True)
-    
-    # Decompose molecules to scaffolds and sidechains
-    st.info("🔬 Decomposing molecules...")
+    # Display progress
     progress_bar = st.progress(0)
     
-    row_list = []
-    for idx, (smiles, name, pIC50, mol) in enumerate(valid_df[['SMILES', 'Name', 'pIC50', 'mol']].values):
-        try:
-            # Try multiple fragmentation methods
-            fragments = []
-            
-            # Method 1: Simple SMARTS-based
-            fragments1 = get_mmp_fragments_simple(mol)
-            if fragments1:
-                fragments.extend(fragments1)
-            
-            # Method 2: Murcko scaffolds
-            fragments2 = get_murcko_fragments(mol)
-            if fragments2:
-                fragments.extend(fragments2)
-            
-            # Method 3: Simple substituents
-            fragments3 = get_simple_substituents(mol)
-            if fragments3:
-                fragments.extend(fragments3)
-            
-            # Remove duplicates
-            unique_fragments = []
-            seen = set()
-            for scaffold_mol, substituent_mol in fragments:
-                try:
-                    scaffold_smiles = Chem.MolToSmiles(scaffold_mol)
-                    substituent_smiles = Chem.MolToSmiles(substituent_mol)
-                    key = (scaffold_smiles, substituent_smiles)
-                    if key not in seen:
-                        seen.add(key)
-                        unique_fragments.append((scaffold_mol, substituent_mol))
-                except:
-                    continue
-            
-            for scaffold_mol, substituent_mol in unique_fragments:
-                try:
-                    scaffold_smiles = Chem.MolToSmiles(scaffold_mol)
-                    substituent_smiles = Chem.MolToSmiles(substituent_mol)
-                    
-                    # Add to results
-                    row_list.append([smiles, scaffold_smiles, substituent_smiles, name, pIC50])
-                except:
-                    continue
-        
-        except Exception as e:
-            st.warning(f"Error processing molecule {name}: {e}")
-        
-        progress_bar.progress((idx + 1) / len(valid_df))
+    def update_progress(progress):
+        progress_bar.progress(progress)
     
-    if not row_list:
-        st.error("No valid fragments generated.")
-        st.error("This could be because:")
-        st.error("1. Molecules are too simple or don't have clear substituents")
-        st.error("2. Try using compounds with common scaffolds and different R-groups")
-        return None, None, None, None
+    # Find scaffolds
+    st.info("🔬 Finding scaffolds...")
+    mol_df, scaffold_df = find_scaffolds(valid_df, progress_callback=update_progress)
     
-    row_df = pd.DataFrame(row_list, columns=["SMILES", "Core", "R_group", "Name", "pIC50"])
-    st.info(f"✅ Generated {len(row_df)} fragment pairs.")
+    if len(mol_df) == 0 or len(scaffold_df) == 0:
+        st.error("No scaffolds found.")
+        return None, None
     
-    # Collect pairs with same scaffold
-    st.info("🤝 Finding molecular pairs...")
+    # Filter scaffolds by minimum count
+    filtered_scaffolds = scaffold_df[scaffold_df['Count'] >= min_scaffold_count]
+    
+    if len(filtered_scaffolds) == 0:
+        st.warning(f"No scaffolds found with at least {min_scaffold_count} occurrences.")
+        st.info("Try lowering the minimum scaffold count.")
+        return scaffold_df, mol_df
+    
+    st.success(f"✅ Found {len(filtered_scaffolds)} scaffolds with at least {min_scaffold_count} occurrences.")
+    
+    return filtered_scaffolds, mol_df
+
+def run_mmp_analysis_from_scaffolds(scaffold_df, mol_df, activity_df, min_occurrences=2):
+    """Run MMP analysis based on identified scaffolds"""
+    
+    if len(scaffold_df) == 0 or len(mol_df) == 0:
+        st.error("No scaffolds or molecules to analyze.")
+        return None, None, None
+    
     delta_list = []
     
-    # Group by scaffold and find pairs
-    for core_smiles, group in row_df.groupby("Core"):
-        if len(group) > 1:
-            compounds = group.to_dict('records')
+    # For each scaffold, find molecular pairs
+    for scaffold in scaffold_df['Scaffold'].head(10):  # Limit to top 10 scaffolds for performance
+        try:
+            # Get molecules with this scaffold
+            cores, rgroup_df = get_molecules_with_scaffold(scaffold, mol_df, activity_df)
             
-            # Create all possible pairs
-            for i in range(len(compounds)):
-                for j in range(i+1, len(compounds)):
-                    comp_a = compounds[i]
-                    comp_b = compounds[j]
+            if len(rgroup_df) < 2:
+                continue
+            
+            # Get R-group columns
+            rgroup_columns = [col for col in rgroup_df.columns if col.startswith('R')]
+            
+            if len(rgroup_columns) == 0:
+                continue
+            
+            # Create pairs based on R-group differences
+            for i in range(len(rgroup_df)):
+                for j in range(i+1, len(rgroup_df)):
+                    row_i = rgroup_df.iloc[i]
+                    row_j = rgroup_df.iloc[j]
                     
-                    if comp_a['SMILES'] != comp_b['SMILES']:
-                        # Calculate delta pIC50
-                        delta = comp_b['pIC50'] - comp_a['pIC50']
-                        
-                        # Create transform string
-                        transform = f"{comp_a['R_group']}>>{comp_b['R_group']}"
+                    # Check if they differ in exactly one R-group
+                    differing_rgroups = []
+                    for rg_col in rgroup_columns:
+                        if row_i[rg_col] != row_j[rg_col]:
+                            differing_rgroups.append(rg_col)
+                    
+                    if len(differing_rgroups) == 1:
+                        # This is a valid MMP pair
+                        rg_col = differing_rgroups[0]
+                        transform = f"{row_i[rg_col]}>>{row_j[rg_col]}"
+                        delta = row_j['pIC50'] - row_i['pIC50']
                         
                         delta_list.append([
-                            comp_a['SMILES'], comp_a['Core'], comp_a['R_group'], comp_a['Name'], comp_a['pIC50'],
-                            comp_b['SMILES'], comp_b['Core'], comp_b['R_group'], comp_b['Name'], comp_b['pIC50'],
+                            row_i['SMILES'], scaffold, row_i[rg_col], row_i['Name'], row_i['pIC50'],
+                            row_j['SMILES'], scaffold, row_j[rg_col], row_j['Name'], row_j['pIC50'],
                             transform, delta
                         ])
+        
+        except Exception as e:
+            st.warning(f"Error processing scaffold {scaffold[:50]}: {e}")
+            continue
     
     if not delta_list:
-        st.error("No molecular pairs found.")
-        return None, None, None, None
+        st.warning("No MMP pairs found from scaffolds.")
+        return None, None, None
     
     cols = ["SMILES_1", "Core_1", "R_group_1", "Name_1", "pIC50_1",
-           "SMILES_2", "Core_2", "Rgroup_1", "Name_2", "pIC50_2",
+           "SMILES_2", "Core_2", "R_group_2", "Name_2", "pIC50_2",
            "Transform", "Delta"]
     delta_df = pd.DataFrame(delta_list, columns=cols)
-    st.info(f"✅ Found {len(delta_df)} molecular pairs.")
     
-    # Collect frequently occurring pairs
-    st.info("📊 Analyzing transformations...")
+    # Aggregate transformations
     mmp_list = []
-    transform_to_idx = {}
-    
-    for idx, (transform, group) in enumerate(delta_df.groupby("Transform")):
+    for transform, group in delta_df.groupby("Transform"):
         if len(group) >= min_occurrences:
             mmp_list.append([transform, len(group), group.Delta.values])
-            transform_to_idx[transform] = idx
     
     if not mmp_list:
         st.warning(f"No transformations found with at least {min_occurrences} occurrences.")
-        return valid_df, row_df, delta_df, pd.DataFrame()
+        return delta_df, pd.DataFrame()
     
     mmp_df = pd.DataFrame(mmp_list, columns=["Transform", "Count", "Deltas"])
-    mmp_df['idx'] = range(len(mmp_df))
     mmp_df['mean_delta'] = [x.mean() for x in mmp_df.Deltas]
     mmp_df['std_delta'] = [x.std() for x in mmp_df.Deltas]
     
-    st.info(f"✅ Found {len(mmp_df)} significant transformations.")
-    
-    return valid_df, row_df, delta_df, mmp_df
+    return delta_df, mmp_df
 
 # ============================================================================
 # SIDEBAR CONFIGURATION
@@ -1007,7 +809,31 @@ CFc1ccc(cc1)C(=O)O,Compound3,6.9
 ...""")
 
 # Parameters in sidebar
-st.sidebar.header("⚙️ Parameters")
+st.sidebar.header("⚙️ Analysis Parameters")
+analysis_mode = st.sidebar.radio(
+    "Analysis Mode",
+    ["MMP Analysis Only", "Scaffold Finder Only", "Both MMP & Scaffold Analysis"],
+    index=2,
+    help="Choose the analysis mode"
+)
+
+min_scaffold_count = st.sidebar.slider(
+    "Minimum scaffold occurrences",
+    min_value=1,
+    max_value=20,
+    value=2,
+    help="Minimum number of compounds sharing a scaffold"
+)
+
+min_fragment_fraction = st.sidebar.slider(
+    "Minimum fragment fraction",
+    min_value=0.1,
+    max_value=1.0,
+    value=0.67,
+    step=0.05,
+    help="Minimum fraction of atoms in scaffold (relative to original molecule)"
+)
+
 min_transform_occurrence = st.sidebar.slider(
     "Minimum transform occurrences",
     min_value=1,
@@ -1048,7 +874,7 @@ if uploaded_file is not None:
             st.info(f"Available columns: {list(df.columns)}")
             st.stop()
         
-        # Display data preview with enhanced view
+        # Display data preview
         st.header("📊 Data Preview")
         
         col_preview1, col_preview2 = st.columns([1, 2])
@@ -1058,7 +884,7 @@ if uploaded_file is not None:
             st.write(f"Total compounds: {len(df)}")
         
         with col_preview2:
-            # Basic statistics in a nicer format
+            # Basic statistics
             st.subheader("📈 Basic Statistics")
             stats_cols = st.columns(4)
             stats_data = {
@@ -1081,205 +907,209 @@ if uploaded_file is not None:
             st.pyplot(fig)
             plt.close(fig)
         
-        # Run MMP analysis
-        with st.spinner("Running MMP analysis..."):
-            result = run_mmp_analysis(df, min_transform_occurrence)
-            
-            if result[0] is None:
-                st.error("Analysis failed. Please check your data and parameters.")
-                st.stop()
-            
-            df_processed, row_df, delta_df, mmp_df = result
+        # Process molecules
+        df['mol'] = df['SMILES'].apply(Chem.MolFromSmiles)
+        valid_df = df[df['mol'].notna()].copy()
         
-        if len(mmp_df) == 0:
-            st.warning("No significant transformations found.")
-            st.info("Suggestions:")
-            st.info("1. Lower the minimum occurrence threshold (try 1)")
-            st.info("2. Use compounds with a common scaffold and different R-groups")
-            st.info("3. Try the example data below to see how it should work")
+        if len(valid_df) == 0:
+            st.error("No valid molecules found in the dataset.")
+            st.stop()
+        
+        # Run selected analysis
+        if analysis_mode in ["Scaffold Finder Only", "Both MMP & Scaffold Analysis"]:
+            st.header("🏗️ Scaffold Finder Analysis")
             
-            # Show fragment preview if available
-            if row_df is not None and len(row_df) > 0:
-                st.subheader("Generated Fragments Preview")
-                st.dataframe(row_df.head(), use_container_width=True)
-        else:
-            st.success(f"✅ Analysis complete! Found {len(mmp_df)} significant transformations")
-            
-            # Display results in tabs
-            tab1, tab2, tab3, tab4 = st.tabs(["📈 Top Transforms", "📉 Bottom Transforms", "🔍 All Transforms", "📥 Export"])
-            
-            with tab1:
-                st.header("🏆 Top Potency-Enhancing Transformations")
-                
-                # Sort by mean_delta descending for positive effects
-                top_positive = mmp_df.sort_values('mean_delta', ascending=False).head(num_top_transforms)
-                
-                for i, (idx, row) in enumerate(top_positive.iterrows()):
-                    st.markdown(f"## Transformation #{i+1}")
-                    
-                    # Use the enhanced display function
-                    display_transformation_with_examples(
-                        row['Transform'], 
-                        delta_df, 
-                        df_processed,
-                        i,
-                        highlight_common_core
-                    )
-                    
-                    st.markdown("---")
-            
-            with tab2:
-                st.header("⚠️ Top Potency-Diminishing Transformations")
-                
-                # Sort by mean_delta ascending for negative effects
-                top_negative = mmp_df.sort_values('mean_delta', ascending=True).head(num_top_transforms)
-                
-                for i, (idx, row) in enumerate(top_negative.iterrows()):
-                    st.markdown(f"## Transformation #{i+1}")
-                    
-                    # Use the enhanced display function
-                    display_transformation_with_examples(
-                        row['Transform'], 
-                        delta_df, 
-                        df_processed,
-                        i,
-                        highlight_common_core
-                    )
-                    
-                    st.markdown("---")
-            
-            with tab3:
-                st.header("📋 All Significant Transformations")
-                
-                # Sort all transforms by mean_delta
-                mmp_df_sorted = mmp_df.sort_values('mean_delta', ascending=False)
-                
-                # Create an interactive table
-                display_df = mmp_df_sorted[['Transform', 'Count', 'mean_delta', 'std_delta']].copy()
-                display_df['mean_delta'] = display_df['mean_delta'].round(3)
-                display_df['std_delta'] = display_df['std_delta'].round(3)
-                display_df.columns = ['Transform', 'Occurrences', 'Mean ΔpIC50', 'Std ΔpIC50']
-                
-                # Add color coding for ΔpIC50
-                def color_negative_red(val):
-                    color = 'red' if val < 0 else ('green' if val > 0 else 'black')
-                    return f'color: {color}'
-                
-                styled_df = display_df.style.applymap(color_negative_red, subset=['Mean ΔpIC50'])
-                
-                st.dataframe(
-                    styled_df,
-                    use_container_width=True,
-                    column_config={
-                        "Transform": st.column_config.TextColumn(
-                            "Transform", 
-                            width="large",
-                            help="Structural transformation pattern"
-                        ),
-                        "Occurrences": st.column_config.NumberColumn(
-                            "Occurrences", 
-                            width="small",
-                            help="Number of times this transformation was observed"
-                        ),
-                        "Mean ΔpIC50": st.column_config.NumberColumn(
-                            "Mean ΔpIC50", 
-                            width="small", 
-                            format="%.3f",
-                            help="Average change in potency"
-                        ),
-                        "Std ΔpIC50": st.column_config.NumberColumn(
-                            "Std ΔpIC50", 
-                            width="small", 
-                            format="%.3f",
-                            help="Standard deviation of potency change"
-                        )
-                    }
+            with st.spinner("Finding scaffolds..."):
+                scaffold_df, mol_df = run_scaffold_analysis(
+                    valid_df, 
+                    min_scaffold_count=min_scaffold_count,
+                    min_fraction=min_fragment_fraction
                 )
-                
-                # Allow users to click on a transformation for details
-                st.subheader("🔍 View Transformation Details")
-                selected_transform = st.selectbox(
-                    "Select a transformation to view details:",
-                    options=mmp_df_sorted['Transform'].tolist(),
-                    format_func=lambda x: f"{x[:50]}..." if len(x) > 50 else x
-                )
-                
-                if selected_transform:
-                    selected_row = mmp_df_sorted[mmp_df_sorted['Transform'] == selected_transform].iloc[0]
-                    display_transformation_with_examples(
-                        selected_row['Transform'], 
-                        delta_df, 
-                        df_processed,
-                        0,
-                        highlight_common_core
-                    )
             
-            with tab4:
-                st.header("💾 Export Results")
+            if scaffold_df is not None and len(scaffold_df) > 0:
+                # Display top scaffolds
+                st.subheader(f"Top {min(10, len(scaffold_df))} Scaffolds")
                 
-                col1, col2, col3 = st.columns(3)
+                # Create a nice display of scaffolds
+                display_scaffold_df = scaffold_df.head(10).copy()
+                display_scaffold_df['Scaffold Image'] = ""  # Placeholder for images
                 
-                with col1:
-                    # Export mmp_df
-                    if len(mmp_df) > 0:
-                        csv1 = mmp_df[['Transform', 'Count', 'mean_delta', 'std_delta']].to_csv(index=False)
-                        st.download_button(
-                            label="📥 Download Transformations (CSV)",
-                            data=csv1,
-                            file_name="mmp_transformations.csv",
-                            mime="text/csv"
-                        )
-                    else:
-                        st.write("No transformations to export")
+                # Display scaffold table with images
+                for idx, row in display_scaffold_df.iterrows():
+                    with st.expander(f"Scaffold {idx+1}: {row['Scaffold'][:50]}... (Count: {row['Count']})", expanded=(idx==0)):
+                        col1, col2 = st.columns([1, 2])
+                        
+                        with col1:
+                            # Display scaffold structure
+                            scaffold_mol = Chem.MolFromSmiles(row['Scaffold'])
+                            if scaffold_mol:
+                                img = Draw.MolToImage(scaffold_mol, size=(300, 300))
+                                st.image(img, caption=f"Scaffold {idx+1}")
+                            
+                            st.write(f"**SMILES:** {row['Scaffold']}")
+                            st.write(f"**Number of Atoms:** {row['NumAtoms']}")
+                            st.write(f"**Number of R-groups:** {row['NumRgroups']}")
+                        
+                        with col2:
+                            # Display compounds with this scaffold
+                            match_df = mol_df[mol_df['Scaffold'] == row['Scaffold']]
+                            st.write(f"**Compounds with this scaffold ({len(match_df)}):**")
+                            
+                            # Show compounds in a grid
+                            compound_cols = st.columns(3)
+                            for i, (_, compound_row) in enumerate(match_df.head(6).iterrows()):
+                                with compound_cols[i % 3]:
+                                    mol = Chem.MolFromSmiles(compound_row['SMILES'])
+                                    if mol:
+                                        img = Draw.MolToImage(mol, size=(150, 150))
+                                        st.image(img, caption=f"{compound_row['Name']}\npIC50: {compound_row['pIC50']:.2f}")
+                            
+                            if len(match_df) > 6:
+                                st.write(f"... and {len(match_df) - 6} more compounds")
                 
-                with col2:
-                    # Export delta_df
-                    if len(delta_df) > 0:
-                        csv2 = delta_df.to_csv(index=False)
-                        st.download_button(
-                            label="📥 Download All Pairs (CSV)",
-                            data=csv2,
-                            file_name="mmp_pairs.csv",
-                            mime="text/csv"
-                        )
-                    else:
-                        st.write("No pairs to export")
-                
-                with col3:
-                    # Export row_df (fragments)
-                    if len(row_df) > 0:
-                        csv3 = row_df.to_csv(index=False)
-                        st.download_button(
-                            label="📥 Download Fragments (CSV)",
-                            data=csv3,
-                            file_name="mmp_fragments.csv",
-                            mime="text/csv"
-                        )
-                    else:
-                        st.write("No fragments to export")
-                
-                # Display summary
-                st.subheader("Summary Statistics")
-                summary_stats = {
-                    'Total Compounds': len(df),
-                    'Valid Compounds': len(df_processed) if df_processed is not None else 0,
-                    'Fragment Pairs': len(row_df) if row_df is not None else 0,
-                    'Molecular Pairs': len(delta_df) if delta_df is not None else 0,
-                    'Significant Transforms': len(mmp_df) if mmp_df is not None else 0,
-                }
-                
-                if len(mmp_df) > 0:
-                    summary_stats['Avg Mean ΔpIC50'] = f"{mmp_df['mean_delta'].mean():.3f}"
+                # MMP analysis based on scaffolds
+                if analysis_mode == "Both MMP & Scaffold Analysis" and len(scaffold_df) > 0:
+                    st.header("🔄 MMP Analysis from Scaffolds")
                     
-                    # Get top and bottom transforms
-                    top_transform = mmp_df.loc[mmp_df['mean_delta'].idxmax()]
-                    bottom_transform = mmp_df.loc[mmp_df['mean_delta'].idxmin()]
+                    with st.spinner("Running MMP analysis from scaffolds..."):
+                        delta_df, mmp_df = run_mmp_analysis_from_scaffolds(
+                            scaffold_df, 
+                            mol_df, 
+                            valid_df[['SMILES', 'Name', 'pIC50', 'mol']],
+                            min_occurrences=min_transform_occurrence
+                        )
                     
-                    summary_stats['Most Positive Transform'] = f"{top_transform['Transform'][:50]}... (Δ={top_transform['mean_delta']:.3f})"
-                    summary_stats['Most Negative Transform'] = f"{bottom_transform['Transform'][:50]}... (Δ={bottom_transform['mean_delta']:.3f})"
+                    if delta_df is not None and mmp_df is not None and len(mmp_df) > 0:
+                        display_mmp_results(mmp_df, delta_df, valid_df)
+                    else:
+                        st.warning("No significant MMP transformations found from scaffolds.")
+        
+        # Original MMP analysis (if selected)
+        if analysis_mode in ["MMP Analysis Only", "Both MMP & Scaffold Analysis"]:
+            if analysis_mode == "MMP Analysis Only":
+                st.header("🔄 Original MMP Analysis")
+            else:
+                st.header("🔄 Additional MMP Analysis (Original Method)")
+            
+            # Run original MMP analysis (simplified version)
+            with st.spinner("Running original MMP analysis..."):
+                # Simplified MMP analysis
+                delta_list = []
                 
-                summary_df = pd.DataFrame(list(summary_stats.items()), columns=['Metric', 'Value'])
-                st.dataframe(summary_df, use_container_width=True, hide_index=True)
+                # Generate fragments for each molecule
+                progress_bar = st.progress(0)
+                for idx, (smiles, name, pIC50, mol) in enumerate(valid_df[['SMILES', 'Name', 'pIC50', 'mol']].values):
+                    try:
+                        # Generate fragments
+                        frag_df = generate_fragments(mol)
+                        
+                        for _, frag_row in frag_df.iterrows():
+                            delta_list.append([
+                                smiles, frag_row['Scaffold'], name, pIC50,
+                                frag_row['NumAtoms'], frag_row['NumRgroups']
+                            ])
+                    except Exception as e:
+                        st.warning(f"Error processing molecule {name}: {e}")
+                    
+                    progress_bar.progress((idx + 1) / len(valid_df))
+                
+                if delta_list:
+                    frag_df = pd.DataFrame(delta_list, columns=[
+                        "SMILES", "Scaffold", "Name", "pIC50", "NumAtoms", "NumRgroups"
+                    ])
+                    
+                    # Find pairs with same scaffold
+                    mmp_pairs = []
+                    for scaffold, group in frag_df.groupby("Scaffold"):
+                        if len(group) > 1:
+                            compounds = group.to_dict('records')
+                            
+                            for i in range(len(compounds)):
+                                for j in range(i+1, len(compounds)):
+                                    comp_a = compounds[i]
+                                    comp_b = compounds[j]
+                                    
+                                    if comp_a['SMILES'] != comp_b['SMILES']:
+                                        delta = comp_b['pIC50'] - comp_a['pIC50']
+                                        transform = f"{comp_a['Name']}>>{comp_b['Name']}"
+                                        
+                                        mmp_pairs.append([
+                                            comp_a['SMILES'], comp_a['Scaffold'], comp_a['Name'], comp_a['pIC50'],
+                                            comp_b['SMILES'], comp_b['Scaffold'], comp_b['Name'], comp_b['pIC50'],
+                                            transform, delta
+                                        ])
+                    
+                    if mmp_pairs:
+                        mmp_cols = ["SMILES_1", "Scaffold_1", "Name_1", "pIC50_1",
+                                  "SMILES_2", "Scaffold_2", "Name_2", "pIC50_2",
+                                  "Transform", "Delta"]
+                        mmp_result_df = pd.DataFrame(mmp_pairs, columns=mmp_cols)
+                        
+                        # Group by transform pattern
+                        transform_stats = []
+                        for transform, group in mmp_result_df.groupby("Transform"):
+                            if len(group) >= min_transform_occurrence:
+                                transform_stats.append([
+                                    transform, len(group), 
+                                    group['Delta'].mean(), group['Delta'].std()
+                                ])
+                        
+                        if transform_stats:
+                            transform_df = pd.DataFrame(transform_stats, 
+                                                      columns=["Transform", "Count", "MeanDelta", "StdDelta"])
+                            transform_df = transform_df.sort_values("MeanDelta", ascending=False)
+                            
+                            st.success(f"✅ Found {len(transform_df)} significant transformations.")
+                            
+                            # Display top transforms
+                            st.subheader(f"Top {min(num_top_transforms, len(transform_df))} Transformations")
+                            
+                            for i, (_, row) in enumerate(transform_df.head(num_top_transforms).iterrows()):
+                                with st.expander(f"Transformation {i+1}: ΔpIC50 = {row['MeanDelta']:.3f} ± {row['StdDelta']:.3f}", 
+                                               expanded=(i==0)):
+                                    col1, col2 = st.columns([1, 2])
+                                    
+                                    with col1:
+                                        st.write(f"**Transformation:**")
+                                        st.code(row['Transform'])
+                                        st.write(f"**Occurrences:** {row['Count']}")
+                                        st.write(f"**Mean ΔpIC50:** {row['MeanDelta']:.3f}")
+                                        st.write(f"**Std ΔpIC50:** {row['StdDelta']:.3f}")
+                                    
+                                    with col2:
+                                        # Show example pairs
+                                        example_pairs = mmp_result_df[
+                                            mmp_result_df['Transform'] == row['Transform']
+                                        ].head(3)
+                                        
+                                        for _, pair in example_pairs.iterrows():
+                                            col_a, col_b = st.columns(2)
+                                            
+                                            with col_a:
+                                                mol_a = Chem.MolFromSmiles(pair['SMILES_1'])
+                                                if mol_a:
+                                                    img = Draw.MolToImage(mol_a, size=(150, 150))
+                                                    st.image(img, 
+                                                           caption=f"{pair['Name_1']}\npIC50: {pair['pIC50_1']:.2f}")
+                                            
+                                            with col_b:
+                                                mol_b = Chem.MolFromSmiles(pair['SMILES_2'])
+                                                if mol_b:
+                                                    img = Draw.MolToImage(mol_b, size=(150, 150))
+                                                    st.image(img, 
+                                                           caption=f"{pair['Name_2']}\npIC50: {pair['pIC50_2']:.2f}")
+                                            
+                                            delta_val = pair['pIC50_2'] - pair['pIC50_1']
+                                            color = "green" if delta_val > 0 else "red" if delta_val < 0 else "gray"
+                                            st.markdown(f"<p style='color:{color}; text-align:center'>ΔpIC50 = {delta_val:.3f}</p>", 
+                                                       unsafe_allow_html=True)
+                                            st.markdown("---")
+                        else:
+                            st.warning("No significant transformations found.")
+                    else:
+                        st.warning("No molecular pairs found.")
+                else:
+                    st.warning("No fragments generated.")
     
     except Exception as e:
         st.error(f"An error occurred: {str(e)}")
@@ -1290,24 +1120,24 @@ else:
     # Show instructions when no file is uploaded
     st.info("👈 Please upload a CSV file to begin analysis")
     
-    # Show example data that works well
+    # Show example data
     st.header("📋 Example Data Format")
     st.markdown("""
-    **For best results, use data like this:**
+    **For best results with scaffold finder, use data like this:**
     
-    Compounds that share a common scaffold (like benzoic acid) with different R-groups.
+    Compounds that share a common scaffold with different R-groups.
     """)
     
     example_data = pd.DataFrame({
         'SMILES': [
-            'Cc1ccccc1C(=O)O',      # Benzoic acid with methyl at position 1
-            'COc1ccccc1C(=O)O',     # Benzoic acid with methoxy at position 1
-            'FC1=C(C(=O)O)C=CC=C1', # Benzoic acid with fluoro at position 2
-            'Clc1ccccc1C(=O)O',     # Benzoic acid with chloro at position 1
-            'BrC1=CC=CC=C1C(=O)O',  # Benzoic acid with bromo at position 1
-            'IC1=CC=CC=C1C(=O)O',   # Benzoic acid with iodo at position 1
-            'OC1=CC=CC=C1C(=O)O',   # Benzoic acid with hydroxy at position 1
-            'NC1=CC=CC=C1C(=O)O',   # Benzoic acid with amino at position 1
+            'Cc1ccccc1C(=O)O',      # Benzoic acid with methyl
+            'COc1ccccc1C(=O)O',     # Benzoic acid with methoxy
+            'FC1=C(C(=O)O)C=CC=C1', # Benzoic acid with fluoro
+            'Clc1ccccc1C(=O)O',     # Benzoic acid with chloro
+            'BrC1=CC=CC=C1C(=O)O',  # Benzoic acid with bromo
+            'IC1=CC=CC=C1C(=O)O',   # Benzoic acid with iodo
+            'OC1=CC=CC=C1C(=O)O',   # Benzoic acid with hydroxy
+            'NC1=CC=CC=C1C(=O)O',   # Benzoic acid with amino
         ],
         'Name': ['Methyl_BA', 'Methoxy_BA', 'Fluoro_BA', 'Chloro_BA', 
                 'Bromo_BA', 'Iodo_BA', 'Hydroxy_BA', 'Amino_BA'],
@@ -1319,8 +1149,6 @@ else:
     # Display example molecules
     if show_molecules:
         st.subheader("Example Molecules")
-        from rdkit.Chem.Draw import MolsToGridImage
-        
         mols = []
         legends = []
         for _, row in example_data.iterrows():
@@ -1342,47 +1170,13 @@ else:
         mime="text/csv",
         help="Download this example dataset to test the app"
     )
-    
-    # Test with example data
-    st.header("🚀 Test with Example Data")
-    if st.button("Run Analysis with Example Data"):
-        with st.spinner("Running analysis with example data..."):
-            try:
-                result = run_mmp_analysis(example_data, 1)  # Use min occurrence of 1 for demo
-                
-                if result[0] is not None:
-                    df_processed, row_df, delta_df, mmp_df = result
-                    
-                    if len(mmp_df) > 0:
-                        st.success(f"✅ Found {len(mmp_df)} transformations!")
-                        
-                        # Show top transform using enhanced display
-                        st.subheader("Top Transformation")
-                        top_transform = mmp_df.sort_values('mean_delta', ascending=False).iloc[0]
-                        
-                        display_transformation_with_examples(
-                            top_transform['Transform'], 
-                            delta_df, 
-                            df_processed,
-                            0,
-                            highlight_common_core
-                        )
-                    else:
-                        st.warning("No transformations found with example data.")
-                        if row_df is not None:
-                            st.subheader("Generated Fragments")
-                            st.dataframe(row_df.head())
-                else:
-                    st.error("Failed to run analysis with example data.")
-            except Exception as e:
-                st.error(f"Error: {e}")
 
 # Footer
 st.markdown("---")
 st.markdown(
     """
     <div style='text-align: center'>
-        <p>Built with ❤️ using Streamlit & RDKit | Matched Molecular Pair Analysis</p>
+        <p>Built with ❤️ using Streamlit & RDKit | MMP Analysis & Scaffold Finder</p>
     </div>
     """,
     unsafe_allow_html=True
