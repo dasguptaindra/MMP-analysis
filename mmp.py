@@ -103,12 +103,10 @@ with st.sidebar:
         min_occurrence = st.slider("Minimum transform occurrences", 1, 20, 5, 
                                   help="Minimum number of occurrences for a transform to be considered")
         
-        # Molecule cleaning options
+        # Molecule cleaning options - REMOVED KEKULIZE OPTION
         st.markdown("### 🧹 Molecule Cleaning")
         sanitize_molecules = st.checkbox("Sanitize molecules", value=True,
                                        help="Clean molecules (recommended)")
-        kekulize_molecules = st.checkbox("Kekulize molecules", value=False,
-                                        help="Force kekulization (may fail for some molecules)")
         
         # Display options
         st.markdown("### 👀 Display Options")
@@ -153,7 +151,7 @@ with st.sidebar:
 # Helper functions (only define if RDKit is available)
 if RDKIT_AVAILABLE:
     @st.cache_data
-    def load_data(file, sanitize=True, kekulize=False):
+    def load_data(file, sanitize=True):
         """Load and preprocess data"""
         if file is not None:
             df = pd.read_csv(file)
@@ -179,20 +177,17 @@ if RDKIT_AVAILABLE:
                     if sanitize:
                         try:
                             Chem.SanitizeMol(mol)
-                        except:
-                            pass  # Skip sanitization if it fails
-                    
-                    # Kekulize if requested
-                    if kekulize:
-                        try:
-                            Chem.Kekulize(mol, clearAromaticFlags=True)
-                        except:
-                            pass  # Skip kekulization if it fails
+                        except Exception as e:
+                            errors.append(f"Row {idx}: Sanitization failed for '{smiles}' - {str(e)}")
+                            # Still use the molecule if sanitization fails
                     
                     # Get largest fragment
-                    frags = Chem.GetMolFrags(mol, asMols=True)
-                    if frags:
-                        mol = max(frags, key=lambda x: x.GetNumAtoms())
+                    try:
+                        frags = Chem.GetMolFrags(mol, asMols=True, sanitizeFrags=False)
+                        if frags:
+                            mol = max(frags, key=lambda x: x.GetNumAtoms())
+                    except:
+                        pass  # If fragmentation fails, use original molecule
                     
                     molecules.append(mol)
                 except Exception as e:
@@ -245,24 +240,29 @@ if RDKIT_AVAILABLE:
             # Create a copy to avoid modifying original
             mol_copy = Chem.Mol(mol)
             
-            # Try to break single bonds
+            # Get list of single bonds
+            single_bonds = []
             for bond in mol_copy.GetBonds():
                 if bond.GetBondType() == Chem.BondType.SINGLE:
+                    single_bonds.append(bond)
+            
+            # Try to break single bonds
+            for bond in single_bonds[:maxCuts]:  # Limit to maxCuts
+                try:
+                    # Create editable molecule
+                    emol = Chem.EditableMol(mol_copy)
+                    emol.RemoveBond(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())
+                    frag_mol = emol.GetMol()
+                    
+                    # Add hydrogens to the fragments
                     try:
-                        # Create editable molecule
-                        emol = Chem.EditableMol(mol_copy)
-                        emol.RemoveBond(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())
-                        frag_mol = emol.GetMol()
-                        
-                        # Try to sanitize
-                        try:
-                            Chem.SanitizeMol(frag_mol)
-                        except:
-                            pass
-                        
-                        results.append((f"CUT_{bond.GetIdx()}", frag_mol))
+                        frag_mol = Chem.AddHs(frag_mol, addCoords=True)
                     except:
-                        continue
+                        pass
+                    
+                    results.append((f"CUT_{bond.GetIdx()}", frag_mol))
+                except:
+                    continue
         except Exception as e:
             pass
         
@@ -306,8 +306,9 @@ if RDKIT_AVAILABLE:
                     if len(pair_list) >= 2:
                         # Convert to SMILES with error handling
                         try:
-                            core_smiles = Chem.MolToSmiles(pair_list[0])
-                            rgroup_smiles = Chem.MolToSmiles(pair_list[1])
+                            # Use kekuleSmiles=False to avoid kekulization issues
+                            core_smiles = Chem.MolToSmiles(pair_list[0], kekuleSmiles=False)
+                            rgroup_smiles = Chem.MolToSmiles(pair_list[1], kekuleSmiles=False)
                             tmp_list = [smiles, core_smiles, rgroup_smiles, name, pIC50]
                             row_list.append(tmp_list)
                             successful += 1
@@ -366,11 +367,9 @@ if RDKIT_AVAILABLE:
                     delta = reagent_b.pIC50 - reagent_a.pIC50
                     
                     # Create transform string - MATCH ORIGINAL FORMAT EXACTLY
-                    # Note: The replace('*','*-') is critical
                     transform_str = f"{reagent_a.R_group.replace('*','*-')}>>{reagent_b.R_group.replace('*','*-')}"
                     
                     # CRITICAL: Create the list in EXACT same order as original
-                    # Original code: list(reagent_a.values) + list(reagent_b.values) + [transform_str, delta]
                     delta_list.append([
                         reagent_a.SMILES, reagent_a.Core, reagent_a.R_group, reagent_a.Name, reagent_a.pIC50,
                         reagent_b.SMILES, reagent_b.Core, reagent_b.R_group, reagent_b.Name, reagent_b.pIC50,
@@ -440,18 +439,26 @@ if RDKIT_AVAILABLE:
             try:
                 # IMPORTANT: Use the same SMARTS conversion as original
                 # Note: replace('*-','*') reverses the earlier replace('*','*-')
-                rxn = AllChem.ReactionFromSmarts(transform.replace('*-','*'), useSmiles=True)
+                rxn_smarts = transform.replace('*-','*')
+                # Try to create reaction from SMILES
+                rxn = AllChem.ReactionFromSmarts(rxn_smarts, useSmiles=True)
                 rxn_mols.append(rxn)
             except Exception as e:
-                # If that fails, try alternative approach
+                # If that fails, try to create from individual components
                 try:
                     parts = transform.split('>>')
                     if len(parts) == 2:
                         left = parts[0].replace('*-','*')
                         right = parts[1].replace('*-','*')
-                        rxn_smarts = f"{left}>>{right}"
-                        rxn = AllChem.ReactionFromSmarts(rxn_smarts, useSmiles=True)
-                        rxn_mols.append(rxn)
+                        left_mol = Chem.MolFromSmiles(left)
+                        right_mol = Chem.MolFromSmiles(right)
+                        if left_mol and right_mol:
+                            rxn = AllChem.ChemicalReaction()
+                            rxn.AddReactantTemplate(left_mol)
+                            rxn.AddProductTemplate(right_mol)
+                            rxn_mols.append(rxn)
+                        else:
+                            rxn_mols.append(None)
                     else:
                         rxn_mols.append(None)
                 except:
@@ -523,59 +530,6 @@ if RDKIT_AVAILABLE:
         
         return pd.DataFrame(example_list)
 
-    def display_molecule_grid(smiles_list, names_list, pIC50_list):
-        """Display molecules in a grid"""
-        cols = st.columns(4)
-        for idx, (smiles, name, pIC50) in enumerate(zip(smiles_list, names_list, pIC50_list)):
-            with cols[idx % 4]:
-                try:
-                    mol = Chem.MolFromSmiles(smiles)
-                    if mol:
-                        img = Draw.MolToImage(mol, size=(200, 200))
-                        st.image(img, caption=f"{name} (pIC50: {pIC50:.2f})")
-                except:
-                    st.write(f"{name}: {smiles}")
-
-    def original_approach_simulation(row_df, show_debug=False):
-        """Simulate the original approach for comparison"""
-        original_delta_list = []
-        
-        for k, v in row_df.groupby("Core"):
-            if len(v) > 2:
-                for a, b in combinations(range(0, len(v)), 2):
-                    reagent_a = v.iloc[a]
-                    reagent_b = v.iloc[b]
-                    
-                    if reagent_a.SMILES == reagent_b.SMILES:
-                        continue
-                    
-                    reagent_a, reagent_b = sorted([reagent_a, reagent_b], key=lambda x: x.SMILES)
-                    
-                    delta = reagent_b.pIC50 - reagent_a.pIC50
-                    
-                    # EXACTLY as in the original code snippet
-                    original_delta_list.append(
-                        list(reagent_a.values) + 
-                        list(reagent_b.values) +
-                        [f"{reagent_a.R_group.replace('*','*-')}>>{reagent_b.R_group.replace('*','*-')}", delta]
-                    )
-        
-        if original_delta_list:
-            cols = [
-                "SMILES_1", "Core_1", "R_group_1", "Name_1", "pIC50_1",
-                "SMILES_2", "Core_2", "R_group_2", "Name_2", "pIC50_2",
-                "Transform", "Delta"
-            ]
-            original_df = pd.DataFrame(original_delta_list, columns=cols)
-            
-            if show_debug:
-                with st.expander("Debug: Original Approach", expanded=False):
-                    st.write(f"Original approach pairs: {len(original_df)}")
-                    st.dataframe(original_df.head(10))
-            
-            return original_df
-        return None
-
 # Main app logic
 if not RDKIT_AVAILABLE:
     st.error("""
@@ -620,11 +574,10 @@ if not RDKIT_AVAILABLE:
 elif uploaded_file is not None:
     # Get parameters from sidebar
     sanitize = sanitize_molecules
-    kekulize = kekulize_molecules
     show_debug = show_debug_info if 'show_debug_info' in locals() else False
     
     # Load data
-    df = load_data(uploaded_file, sanitize=sanitize, kekulize=kekulize)
+    df = load_data(uploaded_file, sanitize=sanitize)
     
     if df is not None and len(df) > 0:
         # Show dataset info
@@ -647,36 +600,6 @@ elif uploaded_file is not None:
             st.success("Analysis complete!")
             col1, col2, col3 = st.columns(3)
             col1.metric("Total Pairs Generated", len(delta_df))
-            
-            # Optional: Compare with original approach
-            if show_debug and 'row_df' in locals():
-                original_df = original_approach_simulation(row_df, show_debug)
-                if original_df is not None:
-                    comparison_col1, comparison_col2 = st.columns(2)
-                    with comparison_col1:
-                        st.info(f"Current approach pairs: {len(delta_df)}")
-                        st.dataframe(delta_df[['SMILES_1', 'SMILES_2', 'Transform', 'Delta']].head(5))
-                    
-                    with comparison_col2:
-                        st.info(f"Original approach pairs: {len(original_df)}")
-                        st.dataframe(original_df[['SMILES_1', 'SMILES_2', 'Transform', 'Delta']].head(5))
-                    
-                    # Check if identical
-                    delta_df_sorted = delta_df.sort_values(['SMILES_1', 'SMILES_2']).reset_index(drop=True)
-                    original_df_sorted = original_df.sort_values(['SMILES_1', 'SMILES_2']).reset_index(drop=True)
-                    
-                    if delta_df_sorted.equals(original_df_sorted):
-                        st.success("✅ Both approaches give identical results!")
-                    else:
-                        st.warning("⚠️ Approaches differ!")
-                        # Show differences
-                        diff_mask = ~delta_df_sorted['Transform'].eq(original_df_sorted['Transform'])
-                        if diff_mask.any():
-                            st.write("Different transforms:")
-                            st.dataframe(pd.DataFrame({
-                                'Current': delta_df_sorted.loc[diff_mask, 'Transform'].values,
-                                'Original': original_df_sorted.loc[diff_mask, 'Transform'].values
-                            }))
             
             if mmp_df is not None:
                 col2.metric("Unique Transforms", len(mmp_df))
@@ -723,18 +646,6 @@ elif uploaded_file is not None:
                                     with st.expander(f"View {len(examples_df)//2} compound pairs for this transform"):
                                         # Display as table first
                                         st.dataframe(examples_df)
-                                        
-                                        # Try to display molecules if possible
-                                        try:
-                                            cols = st.columns(4)
-                                            for idx, (_, example_row) in enumerate(examples_df.iterrows()):
-                                                mol = Chem.MolFromSmiles(example_row['SMILES'])
-                                                if mol:
-                                                    with cols[idx % 4]:
-                                                        img = Draw.MolToImage(mol, size=(200, 200))
-                                                        st.image(img, caption=f"{example_row['Name']} (pIC50: {example_row['pIC50']:.2f})")
-                                        except:
-                                            pass
                 
                 # Show top negative transforms
                 if show_top_negative and len(mmp_df_sorted) > 0:
@@ -774,18 +685,6 @@ elif uploaded_file is not None:
                                     with st.expander(f"View {len(examples_df)//2} compound pairs for this transform"):
                                         # Display as table first
                                         st.dataframe(examples_df)
-                                        
-                                        # Try to display molecules if possible
-                                        try:
-                                            cols = st.columns(4)
-                                            for idx, (_, example_row) in enumerate(examples_df.iterrows()):
-                                                mol = Chem.MolFromSmiles(example_row['SMILES'])
-                                                if mol:
-                                                    with cols[idx % 4]:
-                                                        img = Draw.MolToImage(mol, size=(200, 200))
-                                                        st.image(img, caption=f"{example_row['Name']} (pIC50: {example_row['pIC50']:.2f})")
-                                        except:
-                                            pass
                 
                 # Show all transforms table
                 if len(mmp_df_sorted) > 0:
@@ -888,7 +787,6 @@ else:
     If you encounter errors:
     1. **NumPy compatibility**: Install `numpy<2` with `pip install "numpy<2"`
     2. **Invalid SMILES**: Check your SMILES strings are valid
-    3. **Kekulization errors**: Disable "Kekulize molecules" in sidebar
     
     ### References:
     - Hussain, J. & Rea, C. (2010). Computationally efficient algorithm to identify matched molecular pairs (MMPs) in large data sets. *Journal of Chemical Information and Modeling*, 50(3), 339-348. https://doi.org/10.1021/ci900450m
