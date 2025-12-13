@@ -533,8 +533,16 @@ if st.session_state.processed_data is not None:
                 with col2:
                     # Plot distribution
                     fig, ax = plt.subplots(figsize=(10, 3))
-                    sns.stripplot(x=row['Deltas'], ax=ax, size=10, alpha=0.7, color='blue')
-                    sns.boxplot(x=row['Deltas'], ax=ax, width=0.3, color='orange', alpha=0.3)
+                    
+                    # Convert deltas to list for seaborn compatibility
+                    deltas_list = list(row['Deltas'])
+                    
+                    # Create strip plot
+                    sns.stripplot(x=deltas_list, ax=ax, size=10, alpha=0.7, color='blue')
+                    
+                    # Create box plot with correct data format
+                    sns.boxplot(x=deltas_list, ax=ax, width=0.3, color='orange', alpha=0.3)
+                    
                     ax.axvline(0, color='red', linestyle='--', alpha=0.7)
                     ax.axvline(row['mean_delta'], color='green', linestyle='-', alpha=0.7)
                     ax.set_xlabel(f'Δ{activity_units}')
