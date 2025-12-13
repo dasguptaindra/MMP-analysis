@@ -12,23 +12,30 @@ import base64
 import requests
 import sys
 
-# --- RDKit Utility Functions (Copied/Adapted from the Notebook) ---
-# Note: You would normally put these in a separate utility file (e.g., utils.py)
-# For this self-contained app.py, they are included here.
+# --- CONFIGURATION: REPLACE THIS URL with your own raw GitHub URL ---
+# Assuming you uploaded scaffold_finder.py to your own GitHub repository
+YOUR_SCFFOLD_FINDER_URL = "YOUR_RAW_GITHUB_URL_HERE/scaffold_finder.py" 
+# Example: "https://raw.githubusercontent.com/MyUser/MMP_project/main/scaffold_finder.py"
+# -------------------------------------------------------------------
 
-# Download scaffold_finder.py from GitHub (required for FragmentMol)
+# --- RDKit Utility Functions (Copied/Adapted from the Notebook) ---
+
 @st.cache_resource
-def get_scaffold_finder():
-    """Downloads and imports the scaffold_finder library."""
+def get_scaffold_finder(lib_url=YOUR_SCFFOLD_FINDER_URL):
+    """Downloads and imports the scaffold_finder library from the specified URL."""
     try:
         import scaffold_finder
         return scaffold_finder.FragmentMol
     except ImportError:
-        # Download the file
+        # Download the file from your GitHub URL
         try:
-            st.warning("Downloading 'scaffold_finder.py'. This only happens once.")
-            lib_url = "https://raw.githubusercontent.com/PatWalters/practical_cheminformatics_tutorials/main/sar_analysis/scaffold_finder.py"
+            st.warning(f"Downloading 'scaffold_finder.py' from your custom URL: {lib_url}")
             lib_file = requests.get(lib_url)
+            # Check if the request was successful
+            if lib_file.status_code != 200:
+                st.error(f"Failed to download scaffold_finder.py. Status code: {lib_file.status_code}. Please check the URL.")
+                return None
+                
             with open("scaffold_finder.py", "w") as ofs:
                 ofs.write(lib_file.text)
             
@@ -152,7 +159,7 @@ def decompose_molecules(df_input):
         return pd.DataFrame() # Return empty if dependencies failed
     
     row_list = []
-    # Using iterrows for simplicity in Streamlit caching context, though less efficient than numpy vectorization
+    # Using iterrows for simplicity in Streamlit caching context
     for index, row in df_input.iterrows():
         smiles, name, pIC50, mol = row.SMILES, row.Name, row.pIC50, row.mol
         if mol is None: continue
@@ -192,13 +199,12 @@ def identify_mmp_pairs(row_df):
                 delta = reagent_b.pIC50 - reagent_a.pIC50
                 
                 # Create the transformation string: R_group_1 >> R_group_2
-                # The replace('*','*-') is to ensure '*' is visible for the RDKit reaction smarts
                 transform_str = f"{reagent_a.R_group.replace('*','*-')}>>{reagent_b.R_group.replace('*','*-')}"
                 
                 delta_list.append(list(reagent_a.values) + list(reagent_b.values) + [transform_str, delta])
 
     cols = ["SMILES_1", "Core_1", "R_group_1", "Name_1", "pIC50_1",
-            "SMILES_2", "Core_2", "R_group_2", "Name_2", "pIC50_2", # R_group_2 was Rgroup_1 in notebook
+            "SMILES_2", "Core_2", "R_group_2", "Name_2", "pIC50_2", 
             "Transform", "Delta"]
     return pd.DataFrame(delta_list, columns=cols)
 
@@ -277,10 +283,15 @@ def main():
     st.dataframe(data_df[['SMILES', 'Name', 'pIC50']].head(), use_container_width=True)
     st.markdown("---")
 
+    # Check if fragmentation setup was successful
+    if FragmentMol is None:
+        st.error("Cannot proceed: MMP fragmentation utility failed to load. Please ensure YOUR_RAW_GITHUB_URL_HERE is correct.")
+        return
+
     # 2. Decompose Molecules
     row_df = decompose_molecules(data_df)
     if row_df.empty:
-        st.error("Molecular decomposition failed. Check if 'scaffold_finder' downloaded correctly.")
+        st.warning("Molecular decomposition resulted in no valid core/R-group pairs. This might indicate an issue with the dataset or fragmentation logic.")
         return
         
     # 3. Identify MMP Pairs
@@ -323,7 +334,7 @@ def main():
     mmp_df.sort_values("mean_delta", inplace=True, ascending=ascending)
 
     # Construct and display HTML table
-    st.markdown("### Top Matched Molecular Pairs")
+    st.markdown("### Top Matched Molecular Pairs ")
     html_table = mmp_df[['MMP Transform', 'Count', "mean_delta", "Delta Distribution"]]\
         .round({'mean_delta': 2})\
         .head(rows_to_show)\
