@@ -8,7 +8,6 @@ from rdkit.Chem.rdMMPA import FragmentMol
 from rdkit.Chem import AllChem
 from operator import itemgetter
 from itertools import combinations
-from tqdm import tqdm
 import useful_rdkit_utils as uru
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -17,7 +16,7 @@ import base64
 from rdkit.Chem.Draw import rdMolDraw2D
 
 # -----------------------------
-# Streamlit config
+# Streamlit configuration
 # -----------------------------
 st.set_page_config(
     page_title="MMP Analysis Tool",
@@ -28,7 +27,7 @@ st.set_page_config(
 st.title("🧪 Matched Molecular Pair (MMP) Analysis")
 
 # -----------------------------
-# Helper functions (UNCHANGED LOGIC)
+# Helper functions (LOGIC UNCHANGED)
 # -----------------------------
 
 def remove_map_nums(mol):
@@ -43,8 +42,6 @@ def sort_fragments(mol):
     return [x[1] for x in frag_num_atoms_list]
 
 def rxn_to_base64_image(rxn, size=(300,150)):
-    if rxn is None:
-        return ""
     drawer = rdMolDraw2D.MolDraw2DSVG(size[0], size[1])
     drawer.DrawReaction(rxn)
     drawer.FinishDrawing()
@@ -67,10 +64,34 @@ def stripplot_base64_image(delta_values):
     return f'<img src="data:image/png;base64,{b64}"/>'
 
 # -----------------------------
-# Sidebar controls
+# SAFE wrappers (FIX FOR NULL ERRORS)
 # -----------------------------
 
+def safe_reaction(smarts):
+    try:
+        rxn = AllChem.ReactionFromSmarts(
+            smarts.replace("*-","*"),
+            useSmiles=True
+        )
+        return rxn
+    except:
+        return None
+
+def safe_rxn_image(rxn):
+    if rxn is None:
+        return ""
+    return rxn_to_base64_image(rxn)
+
+def safe_stripplot(deltas):
+    if deltas is None or len(deltas) == 0:
+        return ""
+    return stripplot_base64_image(deltas)
+
+# -----------------------------
+# Sidebar
+# -----------------------------
 st.sidebar.header("⚙️ Settings")
+
 min_transform_occurrence = st.sidebar.slider(
     "Minimum MMP Occurrence",
     min_value=2,
@@ -86,7 +107,6 @@ uploaded_file = st.sidebar.file_uploader(
 # -----------------------------
 # Main workflow
 # -----------------------------
-
 if uploaded_file is not None:
 
     df = pd.read_csv(uploaded_file)
@@ -94,8 +114,8 @@ if uploaded_file is not None:
     st.dataframe(df.head())
 
     with st.spinner("Generating RDKit molecules..."):
-        df['mol'] = df.SMILES.apply(Chem.MolFromSmiles)
-        df['mol'] = df.mol.apply(uru.get_largest_fragment)
+        df["mol"] = df.SMILES.apply(Chem.MolFromSmiles)
+        df["mol"] = df.mol.apply(uru.get_largest_fragment)
 
     # -----------------------------
     # Fragment generation
@@ -105,7 +125,7 @@ if uploaded_file is not None:
     row_list = []
     progress = st.progress(0)
 
-    for i, (smiles, name, pIC50, mol) in enumerate(tqdm(df.values)):
+    for i, (smiles, name, pIC50, mol) in enumerate(df.values):
         frag_list = FragmentMol(mol, maxCuts=1)
         for _, frag_mol in frag_list:
             pair_list = sort_fragments(frag_mol)
@@ -127,16 +147,15 @@ if uploaded_file is not None:
     st.dataframe(row_df.head(20))
 
     # -----------------------------
-    # MMP delta calculation
+    # Delta calculation
     # -----------------------------
     st.subheader("📐 Calculating ΔpIC50")
 
     delta_list = []
     progress = st.progress(0)
-
     grouped = list(row_df.groupby("Core"))
 
-    for i, (k, v) in enumerate(tqdm(grouped)):
+    for i, (k, v) in enumerate(grouped):
         if len(v) > 2:
             for a, b in combinations(range(len(v)), 2):
                 reagent_a = v.iloc[a]
@@ -161,6 +180,7 @@ if uploaded_file is not None:
                         delta
                     ]
                 )
+
         progress.progress((i + 1) / len(grouped))
 
     cols = [
@@ -186,20 +206,21 @@ if uploaded_file is not None:
 
     mmp_df = pd.DataFrame(
         mmp_list,
-        columns=["Transform","Count","Deltas"]
+        columns=["Transform", "Count", "Deltas"]
     )
 
     mmp_df["mean_delta"] = mmp_df.Deltas.apply(np.mean)
-    mmp_df["rxn_mol"] = mmp_df.Transform.apply(
-        lambda x: AllChem.ReactionFromSmarts(
-            x.replace("*-","*"),
-            useSmiles=True
-        )
-    )
+    mmp_df["rxn_mol"] = mmp_df.Transform.apply(safe_reaction)
 
     with st.spinner("Rendering MMP visuals..."):
-        mmp_df["MMP Transform"] = mmp_df.rxn_mol.apply(rxn_to_base64_image)
-        mmp_df["Delta Distribution"] = mmp_df.Deltas.apply(stripplot_base64_image)
+        mmp_df["MMP Transform"] = mmp_df.rxn_mol.apply(safe_rxn_image)
+        mmp_df["Delta Distribution"] = mmp_df.Deltas.apply(safe_stripplot)
+
+    # DROP invalid rows (matches Colab behavior)
+    mmp_df = mmp_df[
+        (mmp_df["MMP Transform"] != "") &
+        (mmp_df["Delta Distribution"] != "")
+    ]
 
     mmp_df.sort_values("mean_delta", ascending=True, inplace=True)
 
@@ -225,7 +246,7 @@ if uploaded_file is not None:
     ).to_csv(index=False)
 
     st.download_button(
-        "Download MMP Table (CSV)",
+        "Download MMP Results (CSV)",
         csv,
         "mmp_results.csv",
         "text/csv"
