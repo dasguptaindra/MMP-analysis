@@ -1,6 +1,6 @@
 🧪 **Matched Molecular Pair (MMP) Analysis Tool**
 
-**A Streamlit-based application for performing Matched Molecular Pair (MMP) analysis to identify structural transformations that influence compound potency (pIC50)**
+**A Streamlit-based application for performing Matched Molecular Pair (MMP) analysis to identify structural transformations that influence the potency (pIC50) of drug molecules**
 
 Explore matched molecular pair (MMP) analysis interactively using the Streamlit-based web tool.
 
