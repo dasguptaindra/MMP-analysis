@@ -988,7 +988,7 @@ else:
     
     This tool performs **Matched Molecular Pair (MMP) analysis** to identify structural transformations that affect compound potency.
     
-    ### Key New Feature: Configurable Number of Cuts
+    ### Feature: Configurable Number of Cuts
     
     You can now choose how many bonds to break when fragmenting molecules:
     
@@ -1040,3 +1040,4 @@ st.markdown("""
     <p>For research use only. Always validate computational predictions with experimental data.</p>
 </div>
 """, unsafe_allow_html=True)
+
