@@ -1070,7 +1070,7 @@ else:
     ### How to use:
     1. **Upload your data** using the sidebar on the left
     2. **Configure parameters** like minimum transform occurrences
-    3. **View results** including top positive/negative transformations with highlighted molecules
+    3. **View results** including top positive/negative transformations 
     4. **Export findings** for further analysis
     
     ### Required CSV format:
@@ -1098,6 +1098,7 @@ st.markdown("""
     <p>For research use only. Always validate computational predictions with experimental data.</p>
 </div>
 """, unsafe_allow_html=True)
+
 
 
 
