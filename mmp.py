@@ -3,8 +3,7 @@ import pandas as pd
 import numpy as np
 from rdkit import Chem
 from rdkit.Chem.rdMMPA import FragmentMol
-from rdkit.Chem import AllChem, Draw, rdMolDraw2D
-from rdkit.Chem.Draw import rdMolDraw2D
+from rdkit.Chem import AllChem, Draw  # Correct import
 from operator import itemgetter
 from itertools import combinations
 import seaborn as sns
@@ -624,3 +623,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
