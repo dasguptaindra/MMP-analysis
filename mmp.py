@@ -16,7 +16,7 @@ import base64
 from rdkit.Chem.Draw import rdMolDraw2D
 
 # -----------------------------
-# Streamlit configuration
+# Streamlit config
 # -----------------------------
 st.set_page_config(
     page_title="MMP Analysis Tool",
@@ -27,7 +27,7 @@ st.set_page_config(
 st.title("🧪 Matched Molecular Pair (MMP) Analysis")
 
 # -----------------------------
-# Helper functions (LOGIC UNCHANGED)
+# Helper functions
 # -----------------------------
 
 def remove_map_nums(mol):
@@ -54,38 +54,22 @@ def stripplot_base64_image(delta_values):
     sns.stripplot(y=delta_values, ax=ax)
     ax.set_ylabel("ΔpIC50")
     plt.tight_layout()
-
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=150)
     plt.close(fig)
     buf.seek(0)
-
     b64 = base64.b64encode(buf.read()).decode("utf-8")
     return f'<img src="data:image/png;base64,{b64}"/>'
 
 # -----------------------------
-# SAFE wrappers (FIX FOR NULL ERRORS)
+# Safe wrappers
 # -----------------------------
 
 def safe_reaction(smarts):
     try:
-        rxn = AllChem.ReactionFromSmarts(
-            smarts.replace("*-","*"),
-            useSmiles=True
-        )
-        return rxn
+        return AllChem.ReactionFromSmarts(smarts.replace("*-","*"), useSmiles=True)
     except:
         return None
-
-def safe_rxn_image(rxn):
-    if rxn is None:
-        return ""
-    return rxn_to_base64_image(rxn)
-
-def safe_stripplot(deltas):
-    if deltas is None or len(deltas) == 0:
-        return ""
-    return stripplot_base64_image(deltas)
 
 # -----------------------------
 # Sidebar
@@ -93,164 +77,92 @@ def safe_stripplot(deltas):
 st.sidebar.header("⚙️ Settings")
 
 min_transform_occurrence = st.sidebar.slider(
-    "Minimum MMP Occurrence",
-    min_value=2,
-    max_value=20,
-    value=5
+    "Minimum MMP Occurrence", 2, 20, 5
 )
 
 uploaded_file = st.sidebar.file_uploader(
-    "Upload CSV (SMILES, Name, pIC50)",
-    type=["csv"]
+    "Upload CSV (SMILES, Name, pIC50)", type=["csv"]
 )
 
 # -----------------------------
-# Main workflow
+# Main
 # -----------------------------
 if uploaded_file is not None:
 
     df = pd.read_csv(uploaded_file)
-    st.subheader("📄 Input Data")
     st.dataframe(df.head())
 
-    with st.spinner("Generating RDKit molecules..."):
-        df["mol"] = df.SMILES.apply(Chem.MolFromSmiles)
-        df["mol"] = df.mol.apply(uru.get_largest_fragment)
+    df["mol"] = df.SMILES.apply(Chem.MolFromSmiles)
+    df["mol"] = df.mol.apply(uru.get_largest_fragment)
 
-    # -----------------------------
-    # Fragment generation
-    # -----------------------------
-    st.subheader("🔬 Fragmenting molecules")
-
+    # Fragmentation
     row_list = []
-    progress = st.progress(0)
-
-    for i, (smiles, name, pIC50, mol) in enumerate(df.values):
+    for smiles, name, pIC50, mol in df.values:
         frag_list = FragmentMol(mol, maxCuts=1)
         for _, frag_mol in frag_list:
             pair_list = sort_fragments(frag_mol)
-            tmp = (
+            row_list.append(
                 [smiles] +
                 [Chem.MolToSmiles(x) for x in pair_list] +
                 [name, pIC50]
             )
-            row_list.append(tmp)
-
-        progress.progress((i + 1) / len(df))
 
     row_df = pd.DataFrame(
         row_list,
-        columns=["SMILES", "Core", "R_group", "Name", "pIC50"]
+        columns=["SMILES","Core","R_group","Name","pIC50"]
     )
 
-    st.subheader("🧬 Core–R Group Table")
-    st.dataframe(row_df.head(20))
-
-    # -----------------------------
-    # Delta calculation
-    # -----------------------------
-    st.subheader("📐 Calculating ΔpIC50")
-
+    # Δ calculation
     delta_list = []
-    progress = st.progress(0)
-    grouped = list(row_df.groupby("Core"))
-
-    for i, (k, v) in enumerate(grouped):
+    for k, v in row_df.groupby("Core"):
         if len(v) > 2:
             for a, b in combinations(range(len(v)), 2):
-                reagent_a = v.iloc[a]
-                reagent_b = v.iloc[b]
-
-                if reagent_a.SMILES == reagent_b.SMILES:
+                ra, rb = v.iloc[a], v.iloc[b]
+                if ra.SMILES == rb.SMILES:
                     continue
-
-                reagent_a, reagent_b = sorted(
-                    [reagent_a, reagent_b],
-                    key=lambda x: x.SMILES
-                )
-
-                delta = reagent_b.pIC50 - reagent_a.pIC50
-
+                ra, rb = sorted([ra, rb], key=lambda x: x.SMILES)
+                delta = rb.pIC50 - ra.pIC50
                 delta_list.append(
-                    list(reagent_a.values) +
-                    list(reagent_b.values) +
-                    [
-                        f"{reagent_a.R_group.replace('*','*-')}>>"
-                        f"{reagent_b.R_group.replace('*','*-')}",
-                        delta
-                    ]
+                    list(ra.values) +
+                    list(rb.values) +
+                    [f"{ra.R_group.replace('*','*-')}>>{rb.R_group.replace('*','*-')}", delta]
                 )
 
-        progress.progress((i + 1) / len(grouped))
-
-    cols = [
+    delta_df = pd.DataFrame(delta_list, columns=[
         "SMILES_1","Core_1","R_group_1","Name_1","pIC50_1",
         "SMILES_2","Core_2","Rgroup_2","Name_2","pIC50_2",
         "Transform","Delta"
-    ]
+    ])
 
-    delta_df = pd.DataFrame(delta_list, columns=cols)
-
-    st.subheader("📊 Delta Table")
-    st.dataframe(delta_df.head(20))
-
-    # -----------------------------
     # Aggregate MMPs
-    # -----------------------------
-    st.subheader("🔁 Aggregating MMP Transforms")
-
-    mmp_list = []
+    mmp_rows = []
     for k, v in delta_df.groupby("Transform"):
         if len(v) > min_transform_occurrence:
-            mmp_list.append([k, len(v), v.Delta.values])
+            mmp_rows.append([k, len(v), np.array(v.Delta)])
 
-    mmp_df = pd.DataFrame(
-        mmp_list,
-        columns=["Transform", "Count", "Deltas"]
-    )
-
+    mmp_df = pd.DataFrame(mmp_rows, columns=["Transform","Count","Deltas"])
     mmp_df["mean_delta"] = mmp_df.Deltas.apply(np.mean)
-    mmp_df["rxn_mol"] = mmp_df.Transform.apply(safe_reaction)
+    mmp_df["rxn"] = mmp_df.Transform.apply(safe_reaction)
 
-    with st.spinner("Rendering MMP visuals..."):
-        mmp_df["MMP Transform"] = mmp_df.rxn_mol.apply(safe_rxn_image)
-        mmp_df["Delta Distribution"] = mmp_df.Deltas.apply(safe_stripplot)
+    # ---- CRITICAL FIX ----
+    # Remove NumPy arrays BEFORE Streamlit rendering
+    mmp_df["MMP Transform"] = mmp_df["rxn"].apply(
+        lambda x: rxn_to_base64_image(x) if x else ""
+    )
+    mmp_df["Delta Distribution"] = mmp_df["Deltas"].apply(stripplot_base64_image)
 
-    # DROP invalid rows (matches Colab behavior)
-    mmp_df = mmp_df[
-        (mmp_df["MMP Transform"] != "") &
-        (mmp_df["Delta Distribution"] != "")
-    ]
+    # Drop problematic columns
+    mmp_df = mmp_df.drop(columns=["Deltas","rxn"])
 
-    mmp_df.sort_values("mean_delta", ascending=True, inplace=True)
-
-    # -----------------------------
-    # Display results
-    # -----------------------------
-    st.subheader("🏆 Final MMP Results")
+    mmp_df.sort_values("mean_delta", inplace=True)
 
     st.markdown(
-        mmp_df[
-            ["MMP Transform","Count","mean_delta","Delta Distribution"]
-        ].round(2).to_html(escape=False),
+        mmp_df[["MMP Transform","Count","mean_delta","Delta Distribution"]]
+        .round(2)
+        .to_html(escape=False),
         unsafe_allow_html=True
     )
 
-    # -----------------------------
-    # Download
-    # -----------------------------
-    st.subheader("⬇️ Download Results")
-
-    csv = mmp_df.drop(
-        columns=["rxn_mol","MMP Transform","Delta Distribution"]
-    ).to_csv(index=False)
-
-    st.download_button(
-        "Download MMP Results (CSV)",
-        csv,
-        "mmp_results.csv",
-        "text/csv"
-    )
-
 else:
-    st.info("👈 Upload a CSV file to start MMP analysis.")
+    st.info("Upload a CSV file to start.")
+
