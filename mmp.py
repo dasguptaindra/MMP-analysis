@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from rdkit import Chem
 from rdkit.Chem.rdMMPA import FragmentMol
-from rdkit.Chem import AllChem, Draw  # Correct import
+from rdkit.Chem import AllChem, Draw, rdMolDraw2D  # Added rdMolDraw2D
 from operator import itemgetter
 from itertools import combinations
 import seaborn as sns
@@ -55,6 +55,21 @@ st.markdown("""
         border-radius: 0.5rem;
         background-color: #f8f9fa;
         margin: 0.5rem 0;
+    }
+    .transform-table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+    .transform-table th {
+        background-color: #3B82F6;
+        color: white;
+        padding: 10px;
+        text-align: center;
+    }
+    .transform-table td {
+        padding: 10px;
+        text-align: center;
+        border-bottom: 1px solid #ddd;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -152,14 +167,16 @@ def rxn_to_base64_image(rxn):
         drawer.FinishDrawing()
         img_data = drawer.GetDrawingText()
         return base64.b64encode(img_data).decode('utf-8')
-    except:
+    except Exception as e:
+        st.warning(f"Could not generate reaction image: {e}")
         return ""
 
 def stripplot_base64_image(data):
     """Create a strip plot and return as base64 image"""
     try:
         fig, ax = plt.subplots(figsize=(4, 1.5))
-        sns.stripplot(x=data, ax=ax, size=6, alpha=0.7)
+        if len(data) > 0:
+            sns.stripplot(x=data, ax=ax, size=6, alpha=0.7)
         ax.axvline(0, ls="--", c="red", alpha=0.5)
         ax.set_xlim(-5, 5)
         ax.set_xlabel('ΔpIC50')
@@ -170,14 +187,18 @@ def stripplot_base64_image(data):
         plt.close(fig)
         buf.seek(0)
         return base64.b64encode(buf.read()).decode('utf-8')
-    except:
+    except Exception as e:
+        st.warning(f"Could not generate strip plot: {e}")
         return ""
 
 def mol_to_smiles(mol):
     """Convert RDKit molecule to SMILES, handling None"""
     if mol is None:
         return ""
-    return Chem.MolToSmiles(mol)
+    try:
+        return Chem.MolToSmiles(mol)
+    except:
+        return ""
 
 # Main analysis function
 def perform_mmp_analysis(df, min_occurrence=5):
@@ -219,7 +240,7 @@ def perform_mmp_analysis(df, min_occurrence=5):
                 if len(pair_list) >= 2:
                     tmp_list = [smiles] + [mol_to_smiles(x) for x in pair_list] + [name, pIC50]
                     row_list.append(tmp_list)
-        except:
+        except Exception as e:
             continue
     
     if not row_list:
@@ -250,7 +271,7 @@ def perform_mmp_analysis(df, min_occurrence=5):
                 if reagent_a.SMILES > reagent_b.SMILES:
                     reagent_a, reagent_b = reagent_b, reagent_a
                 
-                delta = reagent_b.pIC50 - reagent_a.pIC50
+                delta = float(reagent_b.pIC50) - float(reagent_a.pIC50)
                 transform_str = f"{reagent_a.R_group.replace('*', '*-')}>>{reagent_b.R_group.replace('*', '*-')}"
                 
                 delta_list.append(
@@ -285,8 +306,8 @@ def perform_mmp_analysis(df, min_occurrence=5):
     
     mmp_df = pd.DataFrame(mmp_list, columns=["Transform", "Count", "Deltas"])
     mmp_df['idx'] = range(len(mmp_df))
-    mmp_df['mean_delta'] = [x.mean() for x in mmp_df.Deltas]
-    mmp_df['std_delta'] = [x.std() for x in mmp_df.Deltas]
+    mmp_df['mean_delta'] = [np.mean(x) for x in mmp_df.Deltas]
+    mmp_df['std_delta'] = [np.std(x) for x in mmp_df.Deltas]
     
     # Create reaction molecules
     mmp_df['rxn_mol'] = mmp_df.Transform.apply(
@@ -309,23 +330,6 @@ def perform_mmp_analysis(df, min_occurrence=5):
     
     return df, delta_df, mmp_df
 
-def display_molecule_grid(molecules, title, n_cols=4):
-    """Display a grid of molecules"""
-    if not molecules:
-        return
-    
-    st.markdown(f'<h3 class="sub-header">{title}</h3>', unsafe_allow_html=True)
-    
-    cols = st.columns(n_cols)
-    for idx, (mol, name, pIC50) in enumerate(molecules):
-        col_idx = idx % n_cols
-        with cols[col_idx]:
-            try:
-                img = Draw.MolToImage(mol, size=(200, 150))
-                st.image(img, caption=f"{name}\npIC50: {pIC50:.2f}")
-            except:
-                st.write(f"{name}: Invalid molecule")
-
 # Main app logic
 def main():
     # Example data
@@ -347,7 +351,7 @@ def main():
             df = pd.read_csv(uploaded_file)
             
             # Check required columns
-            required_cols = ['SMILES', 'Name', 'pIC50']
+            required_cols = ['SMILES', 'pIC50']
             missing_cols = [col for col in required_cols if col not in df.columns]
             
             if missing_cols:
@@ -355,6 +359,10 @@ def main():
                 st.info("Using example data instead.")
                 df = example_data
             else:
+                # Add Name column if not present
+                if 'Name' not in df.columns:
+                    df['Name'] = [f'Compound_{i+1}' for i in range(len(df))]
+                
                 st.success(f"Successfully loaded {len(df)} molecules from {uploaded_file.name}")
         except Exception as e:
             st.error(f"Error reading file: {e}")
@@ -387,15 +395,15 @@ def main():
                     legends=[f"{name}" for name in names]
                 )
                 st.image(img)
-            except:
-                st.write("Could not generate molecule preview")
+            except Exception as e:
+                st.warning(f"Could not generate molecule preview: {e}")
     
     # Perform analysis when button is clicked
     if st.button("🚀 Perform MMP Analysis", type="primary", use_container_width=True):
         with st.spinner("Performing MMP analysis..."):
             df_processed, delta_df, mmp_df = perform_mmp_analysis(df.copy(), min_transform_occurrence)
         
-        if mmp_df is not None:
+        if mmp_df is not None and len(mmp_df) > 0:
             # Display results
             st.markdown("---")
             st.markdown('<h2 class="main-header">📊 MMP Analysis Results</h2>', unsafe_allow_html=True)
@@ -430,39 +438,41 @@ def main():
                 
                 # Create HTML table with images
                 html_content = """
-                <table style="width:100%; border-collapse: collapse;">
+                <table class="transform-table">
                     <thead>
-                        <tr style="background-color: #3B82F6; color: white;">
-                            <th style="padding: 10px; text-align: center;">Transform</th>
-                            <th style="padding: 10px; text-align: center;">Count</th>
-                            <th style="padding: 10px; text-align: center;">Mean ΔpIC50</th>
-                            <th style="padding: 10px; text-align: center;">Std Dev</th>
-                            <th style="padding: 10px; text-align: center;">Distribution</th>
+                        <tr>
+                            <th>Transform</th>
+                            <th>Count</th>
+                            <th>Mean ΔpIC50</th>
+                            <th>Std Dev</th>
+                            <th>Distribution</th>
                         </tr>
                     </thead>
                     <tbody>
                 """
                 
                 for _, row in display_df.iterrows():
-                    if row['MMP Transform']:
-                        img_tag = f'<img src="data:image/png;base64,{row["MMP Transform"]}" style="max-width: 300px;">'
+                    if row.get('MMP Transform'):
+                        img_tag = f'<img src="data:image/png;base64,{row["MMP Transform"]}" style="max-width: 300px; height: 150px;">'
                     else:
                         img_tag = "N/A"
                     
-                    if row['Delta Distribution']:
-                        dist_tag = f'<img src="data:image/png;base64,{row["Delta Distribution"]}">'
+                    if row.get('Delta Distribution'):
+                        dist_tag = f'<img src="data:image/png;base64,{row["Delta Distribution"]}" style="max-width: 200px; height: 80px;">'
                     else:
                         dist_tag = "N/A"
                     
+                    mean_color = "red" if row['mean_delta'] < 0 else "green"
+                    
                     html_content += f"""
-                    <tr style="border-bottom: 1px solid #ddd;">
-                        <td style="padding: 10px; text-align: center;">{img_tag}</td>
-                        <td style="padding: 10px; text-align: center; font-weight: bold;">{row['Count']}</td>
-                        <td style="padding: 10px; text-align: center; font-weight: bold; color: {'red' if row['mean_delta'] < 0 else 'green'}">
+                    <tr>
+                        <td>{img_tag}</td>
+                        <td style="font-weight: bold;">{row['Count']}</td>
+                        <td style="font-weight: bold; color: {mean_color}">
                             {row['mean_delta']:.2f}
                         </td>
-                        <td style="padding: 10px; text-align: center;">{row['std_delta']:.2f}</td>
-                        <td style="padding: 10px; text-align: center;">{dist_tag}</td>
+                        <td>{row['std_delta']:.2f}</td>
+                        <td>{dist_tag}</td>
                     </tr>
                     """
                 
@@ -496,7 +506,7 @@ def main():
                             st.metric("Standard Deviation", f"{row['std_delta']:.2f}")
                             
                             # Show reaction image
-                            if row['rxn_mol'] is not None:
+                            if row.get('rxn_mol') is not None:
                                 try:
                                     img = Draw.ReactionToImage(row['rxn_mol'])
                                     st.image(img, caption="Reaction Diagram")
@@ -506,7 +516,8 @@ def main():
                         with col2:
                             st.markdown("#### Activity Distribution")
                             fig, ax = plt.subplots(figsize=(8, 4))
-                            ax.hist(row['Deltas'], bins=15, alpha=0.7, color='skyblue', edgecolor='black')
+                            if len(row['Deltas']) > 0:
+                                ax.hist(row['Deltas'], bins=15, alpha=0.7, color='skyblue', edgecolor='black')
                             ax.axvline(row['mean_delta'], color='red', linestyle='--', label=f'Mean: {row["mean_delta"]:.2f}')
                             ax.axvline(0, color='black', linestyle='-', alpha=0.3)
                             ax.set_xlabel('ΔpIC50')
@@ -558,10 +569,11 @@ def main():
                 
                 with col1:
                     st.markdown("**MMP Transforms**")
-                    st.dataframe(mmp_df_sorted[['Transform', 'Count', 'mean_delta', 'std_delta']], use_container_width=True)
+                    display_cols = ['Transform', 'Count', 'mean_delta', 'std_delta']
+                    st.dataframe(mmp_df_sorted[display_cols], use_container_width=True)
                     
                     # Download button for transforms
-                    csv1 = mmp_df_sorted[['Transform', 'Count', 'mean_delta', 'std_delta']].to_csv(index=False)
+                    csv1 = mmp_df_sorted[display_cols].to_csv(index=False)
                     st.download_button(
                         label="Download Transforms CSV",
                         data=csv1,
@@ -595,33 +607,33 @@ def main():
                 import zipfile
                 from io import BytesIO
                 
-                if st.button("📦 Create Complete Export Package", use_container_width=True):
-                    buffer = BytesIO()
-                    with zipfile.ZipFile(buffer, 'w') as zip_file:
-                        # Add transforms
-                        transforms_csv = mmp_df_sorted.to_csv(index=False)
-                        zip_file.writestr('mmp_transforms.csv', transforms_csv)
-                        
-                        # Add pairs
-                        if delta_df is not None:
-                            pairs_csv = delta_df.to_csv(index=False)
-                            zip_file.writestr('mmp_pairs.csv', pairs_csv)
-                        
-                        # Add input data
-                        input_csv = df.to_csv(index=False)
-                        zip_file.writestr('input_data.csv', input_csv)
+                # Create the zip file in memory
+                buffer = BytesIO()
+                with zipfile.ZipFile(buffer, 'w') as zip_file:
+                    # Add transforms
+                    transforms_csv = mmp_df_sorted.to_csv(index=False)
+                    zip_file.writestr('mmp_transforms.csv', transforms_csv)
                     
-                    buffer.seek(0)
+                    # Add pairs
+                    if delta_df is not None:
+                        pairs_csv = delta_df.to_csv(index=False)
+                        zip_file.writestr('mmp_pairs.csv', pairs_csv)
                     
-                    st.download_button(
-                        label="Download ZIP Archive",
-                        data=buffer,
-                        file_name="mmp_analysis_results.zip",
-                        mime="application/zip",
-                        use_container_width=True
-                    )
+                    # Add input data
+                    input_csv = df.to_csv(index=False)
+                    zip_file.writestr('input_data.csv', input_csv)
+                
+                buffer.seek(0)
+                
+                st.download_button(
+                    label="📦 Download ZIP Archive (All Data)",
+                    data=buffer,
+                    file_name="mmp_analysis_results.zip",
+                    mime="application/zip",
+                    use_container_width=True
+                )
+        else:
+            st.warning("No transformations found meeting the criteria. Try adjusting the parameters.")
 
 if __name__ == "__main__":
     main()
-
-
