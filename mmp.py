@@ -534,20 +534,35 @@ if st.session_state.processed_data is not None:
                     # Plot distribution
                     fig, ax = plt.subplots(figsize=(10, 3))
                     
-                    # Convert deltas to list for seaborn compatibility
+                    # Convert deltas to list
                     deltas_list = list(row['Deltas'])
                     
-                    # Create strip plot
-                    sns.stripplot(x=deltas_list, ax=ax, size=10, alpha=0.7, color='blue')
+                    # Create boxplot using matplotlib directly
+                    box = ax.boxplot(deltas_list, widths=0.3, patch_artist=True, 
+                                     positions=[0.5], showfliers=False)
+                    # Style the boxplot
+                    box['boxes'][0].set_facecolor('orange')
+                    box['boxes'][0].set_alpha(0.3)
                     
-                    # Create box plot with correct data format
-                    sns.boxplot(x=deltas_list, ax=ax, width=0.3, color='orange', alpha=0.3)
+                    # Add jittered points (strip plot)
+                    jitter = np.random.normal(0.5, 0.02, size=len(deltas_list))
+                    ax.scatter(jitter, deltas_list, alpha=0.7, color='blue', s=50)
                     
-                    ax.axvline(0, color='red', linestyle='--', alpha=0.7)
-                    ax.axvline(row['mean_delta'], color='green', linestyle='-', alpha=0.7)
+                    # Add lines
+                    ax.axhline(0, color='red', linestyle='--', alpha=0.7, label='Zero line')
+                    ax.axhline(row['mean_delta'], color='green', linestyle='-', alpha=0.7, 
+                               label=f'Mean Δ={row["mean_delta"]:.2f}')
+                    
                     ax.set_xlabel(f'Δ{activity_units}')
                     ax.set_title(f'Distribution of Activity Changes (n={row["Count"]})')
-                    ax.set_xlim(-5, 5)
+                    ax.set_xlim(0, 1)
+                    
+                    # Remove x-axis ticks for boxplot
+                    ax.set_xticks([])
+                    
+                    # Add legend
+                    ax.legend(loc='upper right')
+                    
                     st.pyplot(fig)
                     
                     # Show example pairs
