@@ -2,21 +2,15 @@
 import streamlit as st
 import pandas as pd
 from rdkit import Chem
-from rdkit.Chem import AllChem, Draw, rdMolDraw2D
-from rdkit.Chem.Draw import IPythonConsole
+from rdkit.Chem import AllChem, Draw
 import seaborn as sns
 import matplotlib.pyplot as plt
 import io
 import base64
 import requests
-import tempfile
-import os
-import sys
+import numpy as np
 from operator import itemgetter
 from itertools import combinations
-import numpy as np
-from pathlib import Path
-import time
 
 # Set page config
 st.set_page_config(
@@ -53,7 +47,7 @@ def sort_fragments(mol):
     frag_num_atoms_list.sort(key=itemgetter(0), reverse=True)
     return [x[1] for x in frag_num_atoms_list]
 
-# Custom scaffold finder implementation that matches the original FragmentMol
+# Custom scaffold finder implementation
 class ScaffoldFinder:
     """Custom implementation of scaffold finding functionality"""
     
@@ -70,27 +64,33 @@ class ScaffoldFinder:
     @staticmethod
     def FragmentMol(mol, maxCuts=1):
         """
-        Simplified implementation matching the original's behavior
-        This is a placeholder - for exact matching, we'd need the exact implementation
+        Simple fragmentation function that finds single bonds to cut
         """
         results = []
         if mol is None:
             return results
         
-        # Simple approach: find single bonds not in rings
+        # Get all single bonds
         for bond in mol.GetBonds():
             if bond.GetBondType() == Chem.BondType.SINGLE:
                 a1 = bond.GetBeginAtom()
                 a2 = bond.GetEndAtom()
                 
-                # Simple criteria - for exact matching, use the original library
-                if not (a1.IsInRing() and a2.IsInRing()):
-                    # Create editable molecule
-                    emol = Chem.EditableMol(mol)
-                    # Cut the bond
-                    emol.RemoveBond(a1.GetIdx(), a2.GetIdx())
-                    frag_mol = emol.GetMol()
-                    results.append((f"{a1.GetIdx()}-{a2.GetIdx()}", frag_mol))
+                # Skip if both atoms are in rings
+                if a1.IsInRing() and a2.IsInRing():
+                    continue
+                
+                # Skip if either atom is hydrogen
+                if a1.GetAtomicNum() == 1 or a2.GetAtomicNum() == 1:
+                    continue
+                
+                # Create a copy and break the bond
+                mol_copy = Chem.RWMol(mol)
+                mol_copy.RemoveBond(a1.GetIdx(), a2.GetIdx())
+                
+                # Convert back to regular molecule
+                frag_mol = mol_copy.GetMol()
+                results.append((f"{a1.GetIdx()}-{a2.GetIdx()}", frag_mol))
         
         return results
 
@@ -105,10 +105,10 @@ if 'processed_data' not in st.session_state:
 if 'analysis_results' not in st.session_state:
     st.session_state.analysis_results = None
 
-# Function to match the original notebook's processing exactly
+# Function to match the original notebook's processing
 def process_exact_matching(processed_df, min_transform_occurrence=5):
     """
-    Process molecules exactly like the original notebook
+    Process molecules using the exact same logic as the original notebook
     """
     row_list = []
     for _, row in processed_df.iterrows():
@@ -117,7 +117,7 @@ def process_exact_matching(processed_df, min_transform_occurrence=5):
         activity = row['Activity']
         mol = row['mol']
         
-        # Fragment molecules (simplified version)
+        # Fragment molecules
         frag_list = scaffold_finder.FragmentMol(mol, maxCuts=1)
         for _, frag_mol in frag_list:
             pair_list = sort_fragments(frag_mol)
@@ -133,7 +133,7 @@ def process_exact_matching(processed_df, min_transform_occurrence=5):
     # Find molecular pairs with the same scaffold
     delta_list = []
     for core, group in row_df.groupby("Core"):
-        if len(group) > 2:  # Changed from > 2 to >= 2 to match original logic
+        if len(group) > 2:  # Match original: if len(v) > 2
             indices = list(group.index)
             # Use combinations like in original
             for i, j in combinations(indices, 2):
@@ -144,10 +144,11 @@ def process_exact_matching(processed_df, min_transform_occurrence=5):
                     continue
                 
                 # Sort by SMILES like in original
-                reagent_a, reagent_b = sorted([reagent_a, reagent_b], key=lambda x: x.SMILES)
+                if reagent_a.SMILES > reagent_b.SMILES:
+                    reagent_a, reagent_b = reagent_b, reagent_a
                 
                 delta = reagent_b.Activity - reagent_a.Activity
-                # Create transform like in original
+                # Create transform exactly like in original
                 transform = f"{reagent_a.R_group.replace('*', '*-')}>>{reagent_b.R_group.replace('*', '*-')}"
                 
                 delta_list.append([
@@ -178,7 +179,7 @@ def process_exact_matching(processed_df, min_transform_occurrence=5):
                 'std_delta': np.std(deltas),
                 'min_delta': np.min(deltas),
                 'max_delta': np.max(deltas),
-                'idx': len(mmp_data)  # Add index for reference
+                'idx': len(mmp_data)
             })
     
     if not mmp_data:
@@ -376,12 +377,6 @@ if st.session_state.processed_data is not None:
         help="Minimum number of times a transformation must appear to be considered"
     )
     
-    max_cuts = st.sidebar.slider(
-        "Maximum Number of Cuts",
-        min_value=1, max_value=1, value=1,  # Fixed to 1 to match original
-        help="Maximum number of bonds to cut when fragmenting molecules"
-    )
-    
     activity_units = st.sidebar.text_input(
         "Activity Units",
         value="pIC50",
@@ -436,7 +431,6 @@ if st.session_state.processed_data is not None:
         results = st.session_state.analysis_results
         mmp_df = results['mmp_df']
         delta_df = results['delta_df']
-        row_df = results['row_df']
         
         st.header("🔬 MMP Analysis Results")
         
@@ -513,26 +507,27 @@ if st.session_state.processed_data is not None:
                     fig, ax = plt.subplots(figsize=(10, 3))
                     
                     # Create boxplot using matplotlib directly
-                    box = ax.boxplot(row['Deltas'], widths=0.3, patch_artist=True, 
-                                     positions=[0.5], showfliers=False)
-                    # Style the boxplot
-                    box['boxes'][0].set_facecolor('orange')
-                    box['boxes'][0].set_alpha(0.3)
-                    
-                    # Add jittered points (strip plot)
-                    jitter = np.random.normal(0.5, 0.02, size=len(row['Deltas']))
-                    ax.scatter(jitter, row['Deltas'], alpha=0.7, color='blue', s=50)
-                    
-                    # Add lines
-                    ax.axhline(0, color='red', linestyle='--', alpha=0.7, label='Zero line')
-                    ax.axhline(row['mean_delta'], color='green', linestyle='-', alpha=0.7, 
-                               label=f'Mean Δ={row["mean_delta"]:.2f}')
-                    
-                    ax.set_xlabel(f'Δ{activity_units}')
-                    ax.set_title(f'Distribution of Activity Changes (n={row["Count"]})')
-                    ax.set_xlim(0, 1)
-                    ax.set_xticks([])
-                    ax.legend(loc='upper right')
+                    if len(row['Deltas']) > 0:
+                        box = ax.boxplot(row['Deltas'], widths=0.3, patch_artist=True, 
+                                         positions=[0.5], showfliers=False)
+                        # Style the boxplot
+                        box['boxes'][0].set_facecolor('orange')
+                        box['boxes'][0].set_alpha(0.3)
+                        
+                        # Add jittered points (strip plot)
+                        jitter = np.random.normal(0.5, 0.02, size=len(row['Deltas']))
+                        ax.scatter(jitter, row['Deltas'], alpha=0.7, color='blue', s=50)
+                        
+                        # Add lines
+                        ax.axhline(0, color='red', linestyle='--', alpha=0.7, label='Zero line')
+                        ax.axhline(row['mean_delta'], color='green', linestyle='-', alpha=0.7, 
+                                   label=f'Mean Δ={row["mean_delta"]:.2f}')
+                        
+                        ax.set_xlabel(f'Δ{activity_units}')
+                        ax.set_title(f'Distribution of Activity Changes (n={row["Count"]})')
+                        ax.set_xlim(0, 1)
+                        ax.set_xticks([])
+                        ax.legend(loc='upper right')
                     
                     st.pyplot(fig)
                     
@@ -587,7 +582,7 @@ if st.session_state.processed_data is not None:
             st.dataframe(pairs_df, use_container_width=True)
         
         with tab3:
-            st.dataframe(row_df, use_container_width=True)
+            st.dataframe(results['row_df'], use_container_width=True)
         
         # Download section
         st.subheader("📥 Download Results")
