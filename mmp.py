@@ -20,6 +20,7 @@ try:
     from rdkit.Chem import AllChem, Draw
     from rdkit.Chem.Draw import rdMolDraw2D
     from rdkit.Chem import rdDepictor
+    from rdkit.Chem.Scaffolds import MurckoScaffold
     rdDepictor.SetPreferCoordGen(True)
     RDKIT_AVAILABLE = True
 except ImportError as e:
@@ -92,7 +93,7 @@ num_top_transforms = st.sidebar.slider(
     value=3
 )
 
-# NEW: Visualization parameters
+# Visualization parameters
 st.sidebar.header("🎨 Visualization Settings")
 show_smiles = st.sidebar.checkbox("Show SMILES", value=True, help="Display SMILES strings")
 show_molecules = st.sidebar.checkbox("Show molecule images", value=True, help="Display molecule structures")
@@ -260,6 +261,272 @@ def create_text_visualization(text, size):
     
     return img
 
+# ORIGINAL FRAGMENTATION FUNCTIONS (Must be included)
+def get_mmp_fragments_simple(mol):
+    """Simple fragmentation method using common attachment points"""
+    fragments = []
+    
+    try:
+        # Convert to SMILES and look for common attachment patterns
+        smiles = Chem.MolToSmiles(mol)
+        
+        # Try to fragment at common positions using SMARTS
+        # Pattern for aromatic carbon with substituent
+        aromatic_pattern = Chem.MolFromSmarts('[c;H1]')
+        
+        # Pattern for aliphatic carbon with substituent
+        aliphatic_pattern = Chem.MolFromSmarts('[C;H2]')
+        
+        # Pattern for nitrogen with substituent
+        nitrogen_pattern = Chem.MolFromSmarts('[N;H2]')
+        
+        patterns = [aromatic_pattern, aliphatic_pattern, nitrogen_pattern]
+        pattern_names = ['aromatic', 'aliphatic', 'nitrogen']
+        
+        for pattern, name in zip(patterns, pattern_names):
+            if pattern:
+                matches = mol.GetSubstructMatches(pattern)
+                for match in matches:
+                    if len(match) > 0:
+                        atom_idx = match[0]
+                        
+                        # Create a modified molecule with wildcard
+                        mol_copy = Chem.RWMol(mol)
+                        
+                        # Get the atom
+                        atom = mol_copy.GetAtomWithIdx(atom_idx)
+                        
+                        # Create scaffold: replace the atom with wildcard
+                        wildcard = Chem.Atom(0)  # Wildcard atom
+                        wildcard.SetAtomMapNum(1)
+                        mol_copy.ReplaceAtom(atom_idx, wildcard)
+                        
+                        # Create substituent: extract the atom and its neighbors
+                        substituent_mol = Chem.RWMol()
+                        
+                        # Add the atom with wildcard
+                        sub_atom = Chem.Atom(atom.GetAtomicNum())
+                        sub_atom.SetAtomMapNum(2)
+                        sub_idx = substituent_mol.AddAtom(sub_atom)
+                        
+                        # Add the atom's neighbors (except hydrogens)
+                        atom_map = {atom_idx: sub_idx}
+                        for neighbor in atom.GetNeighbors():
+                            if neighbor.GetAtomicNum() != 1:  # Skip hydrogens
+                                new_atom = Chem.Atom(neighbor.GetAtomicNum())
+                                new_idx = substituent_mol.AddAtom(new_atom)
+                                atom_map[neighbor.GetIdx()] = new_idx
+                                
+                                # Add bond
+                                bond_type = mol.GetBondBetweenAtoms(atom_idx, neighbor.GetIdx()).GetBondType()
+                                substituent_mol.AddBond(sub_idx, new_idx, bond_type)
+                        
+                        # Clean up molecules
+                        try:
+                            scaffold = mol_copy.GetMol()
+                            substituent = substituent_mol.GetMol()
+                            
+                            Chem.SanitizeMol(scaffold)
+                            Chem.SanitizeMol(substituent)
+                            
+                            fragments.append((scaffold, substituent))
+                        except:
+                            continue
+        
+        # If no fragments found with patterns, try a simpler approach
+        if not fragments:
+            # Just split at the first non-ring single bond
+            for bond in mol.GetBonds():
+                if bond.GetBondType() == Chem.rdchem.BondType.SINGLE:
+                    a1 = bond.GetBeginAtom()
+                    a2 = bond.GetEndAtom()
+                    
+                    # Create fragments by breaking this bond
+                    mol_copy = Chem.RWMol(mol)
+                    
+                    # Replace both atoms with wildcards
+                    a1_idx = bond.GetBeginAtomIdx()
+                    a2_idx = bond.GetEndAtomIdx()
+                    
+                    wildcard1 = Chem.Atom(0)
+                    wildcard1.SetAtomMapNum(1)
+                    mol_copy.ReplaceAtom(a1_idx, wildcard1)
+                    
+                    wildcard2 = Chem.Atom(0)
+                    wildcard2.SetAtomMapNum(2)
+                    mol_copy.ReplaceAtom(a2_idx, wildcard2)
+                    
+                    try:
+                        scaffold = mol_copy.GetMol()
+                        Chem.SanitizeMol(scaffold)
+                        
+                        # Create substituent as just a wildcard
+                        substituent = Chem.MolFromSmiles('*')
+                        substituent.GetAtomWithIdx(0).SetAtomMapNum(2)
+                        
+                        fragments.append((scaffold, substituent))
+                    except:
+                        continue
+        
+        # Remove duplicates
+        unique_fragments = []
+        seen = set()
+        for scaffold, substituent in fragments:
+            scaffold_smiles = Chem.MolToSmiles(scaffold)
+            substituent_smiles = Chem.MolToSmiles(substituent)
+            key = (scaffold_smiles, substituent_smiles)
+            if key not in seen:
+                seen.add(key)
+                unique_fragments.append((scaffold, substituent))
+        
+        return unique_fragments
+    
+    except Exception as e:
+        st.warning(f"Fragmentation error: {e}")
+        return []
+
+def get_murcko_fragments(mol):
+    """Use RDKit's Murcko scaffold decomposition"""
+    try:
+        # Get Murcko scaffold
+        scaffold = MurckoScaffold.GetScaffoldForMol(mol)
+        
+        # Get sidechains by removing scaffold from molecule
+        scaffold_atoms = set(scaffold.GetAtoms())
+        mol_atoms = set(mol.GetAtoms())
+        
+        # Find atoms that are not in scaffold
+        sidechain_atoms = mol_atoms - scaffold_atoms
+        
+        if len(sidechain_atoms) > 0:
+            # Create sidechain molecule
+            sidechain_mol = Chem.RWMol()
+            atom_map = {}
+            
+            # Add sidechain atoms
+            for atom in sidechain_atoms:
+                new_atom = Chem.Atom(atom.GetAtomicNum())
+                new_idx = sidechain_mol.AddAtom(new_atom)
+                atom_map[atom.GetIdx()] = new_idx
+            
+            # Add bonds between sidechain atoms
+            for atom in sidechain_atoms:
+                for neighbor in atom.GetNeighbors():
+                    if neighbor in sidechain_atoms:
+                        bond = mol.GetBondBetweenAtoms(atom.GetIdx(), neighbor.GetIdx())
+                        if bond and atom.GetIdx() < neighbor.GetIdx():
+                            sidechain_mol.AddBond(
+                                atom_map[atom.GetIdx()],
+                                atom_map[neighbor.GetIdx()],
+                                bond.GetBondType()
+                            )
+            
+            # Add attachment point wildcards
+            scaffold_with_wildcard = Chem.RWMol(scaffold)
+            for atom in scaffold.GetAtoms():
+                for neighbor in atom.GetNeighbors():
+                    if neighbor in sidechain_atoms:
+                        # Replace with wildcard in scaffold
+                        wildcard = Chem.Atom(0)
+                        wildcard.SetAtomMapNum(1)
+                        scaffold_with_wildcard.ReplaceAtom(atom.GetIdx(), wildcard)
+                        
+                        # Add wildcard to sidechain
+                        sidechain_atom = sidechain_mol.GetAtomWithIdx(atom_map[neighbor.GetIdx()])
+                        sidechain_atom.SetAtomMapNum(2)
+            
+            try:
+                scaffold_final = scaffold_with_wildcard.GetMol()
+                sidechain_final = sidechain_mol.GetMol()
+                Chem.SanitizeMol(scaffold_final)
+                Chem.SanitizeMol(sidechain_final)
+                return [(scaffold_final, sidechain_final)]
+            except:
+                return []
+        
+        return []
+    
+    except Exception as e:
+        st.warning(f"Murcko fragmentation error: {e}")
+        return []
+
+def get_simple_substituents(mol):
+    """Extract common substituents from molecules"""
+    fragments = []
+    
+    try:
+        # Common substituent patterns
+        substituents = [
+            ('[CH3]', 'Methyl'),
+            ('[OH]', 'Hydroxy'),
+            ('[NH2]', 'Amino'),
+            ('[F]', 'Fluoro'),
+            ('[Cl]', 'Chloro'),
+            ('[Br]', 'Bromo'),
+            ('[I]', 'Iodo'),
+            ('[OCH3]', 'Methoxy'),
+            ('[N+]', 'Ammonium'),
+            ('[C=O]', 'Carbonyl'),
+        ]
+        
+        for sub_smarts, name in substituents:
+            pattern = Chem.MolFromSmarts(sub_smarts)
+            if pattern:
+                matches = mol.GetSubstructMatches(pattern)
+                for match in matches:
+                    if len(match) > 0:
+                        # Create scaffold by removing this substituent
+                        scaffold_mol = Chem.RWMol(mol)
+                        
+                        # Remove the matched atoms
+                        for atom_idx in sorted(match, reverse=True):
+                            try:
+                                scaffold_mol.RemoveAtom(atom_idx)
+                            except:
+                                pass
+                        
+                        # Add wildcard at attachment point
+                        if scaffold_mol.GetNumAtoms() > 0:
+                            # Create substituent as the pattern with wildcard
+                            substituent_mol = Chem.MolFromSmiles(sub_smarts.replace('[', '').replace(']', ''))
+                            if substituent_mol:
+                                # Add wildcard
+                                for atom in substituent_mol.GetAtoms():
+                                    if atom.GetDegree() == 1:  # Terminal atom
+                                        atom.SetAtomMapNum(2)
+                                        break
+                                
+                                # Add wildcard to scaffold
+                                for atom in scaffold_mol.GetAtoms():
+                                    if atom.GetDegree() < atom.GetExplicitValence():
+                                        atom.SetAtomMapNum(1)
+                                        break
+                                
+                                try:
+                                    scaffold = scaffold_mol.GetMol()
+                                    substituent = substituent_mol
+                                    Chem.SanitizeMol(scaffold)
+                                    Chem.SanitizeMol(substituent)
+                                    fragments.append((scaffold, substituent))
+                                except:
+                                    continue
+        
+        return fragments
+    
+    except Exception as e:
+        st.warning(f"Simple substituent error: {e}")
+        return []
+
+def get_largest_fragment(mol):
+    """Get the largest fragment from a molecule"""
+    try:
+        frags = Chem.GetMolFrags(mol, asMols=True)
+        if frags:
+            return max(frags, key=lambda x: x.GetNumAtoms())
+        return mol
+    except:
+        return mol
+
 # NEW: Function to display transformation with examples
 def display_transformation_with_examples(transform_str, delta_df, compounds_df, 
                                         transform_idx, highlight_core=True):
@@ -398,12 +665,15 @@ def display_transformation_with_examples(transform_str, delta_df, compounds_df,
         
         with col2:
             # QQ plot for normality check
-            from scipy import stats
-            fig, ax = plt.subplots(figsize=(4, 3))
-            stats.probplot(transform_pairs['Delta'].values, dist="norm", plot=ax)
-            ax.set_title('Q-Q Plot')
-            st.pyplot(fig)
-            plt.close(fig)
+            try:
+                from scipy import stats
+                fig, ax = plt.subplots(figsize=(4, 3))
+                stats.probplot(transform_pairs['Delta'].values, dist="norm", plot=ax)
+                ax.set_title('Q-Q Plot')
+                st.pyplot(fig)
+                plt.close(fig)
+            except:
+                st.info("Install scipy for Q-Q plots: pip install scipy")
     
     return example_pairs
 
@@ -420,8 +690,78 @@ def rxn_to_image(rxn_smarts, width=300, height=150):
         draw.text((10, height//2 - 10), str(rxn_smarts)[:50], fill='black')
         return img
 
-# [Keep all your existing fragmentation and analysis functions as they are]
-# ... (all the existing fragmentation functions remain unchanged) ...
+# Plotting functions
+def mol_to_image(mol, width=200, height=200):
+    """Convert RDKit molecule to PIL Image"""
+    try:
+        img = Draw.MolToImage(mol, size=(width, height))
+        return img
+    except:
+        # Create a placeholder image
+        img = Image.new('RGB', (width, height), color='white')
+        return img
+
+def create_stripplot(deltas, figsize=(4, 1.5)):
+    """Create a stripplot for delta distribution"""
+    fig, ax = plt.subplots(figsize=figsize)
+    try:
+        if len(deltas) > 0:
+            sns.stripplot(x=deltas, ax=ax, jitter=0.3, alpha=0.7, s=8, color='steelblue')
+        ax.axvline(0, ls="--", c="red", alpha=0.7)
+        
+        # Set appropriate xlim based on data
+        if len(deltas) > 0:
+            x_range = max(abs(min(deltas)), abs(max(deltas))) * 1.1
+            ax.set_xlim(-x_range, x_range)
+        else:
+            ax.set_xlim(-5, 5)
+            
+        ax.set_xlabel("ΔpIC50")
+        ax.set_ylabel("")
+        ax.set_yticks([])
+        plt.tight_layout()
+    except Exception as e:
+        ax.text(0.5, 0.5, "Error creating plot", ha='center', va='center')
+    return fig
+
+def display_compound_grid(compounds_df, smiles_col="SMILES", id_col="Name", value_col="pIC50"):
+    """Display compounds in a grid format"""
+    n_cols = 4
+    n_rows = (len(compounds_df) + n_cols - 1) // n_cols
+    
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4*n_cols, 3*n_rows))
+    if n_rows == 1:
+        axes = [axes]
+    if n_cols == 1:
+        axes = [[ax] for ax in axes]
+    
+    for idx, (_, row) in enumerate(compounds_df.iterrows()):
+        row_idx = idx // n_cols
+        col_idx = idx % n_cols
+        
+        try:
+            mol = Chem.MolFromSmiles(row[smiles_col])
+            if mol:
+                img = Draw.MolToImage(mol, size=(250, 250))
+                axes[row_idx][col_idx].imshow(img)
+                title = f"{row[id_col]}\n{value_col}: {row[value_col]:.2f}"
+                axes[row_idx][col_idx].set_title(title, fontsize=9)
+            else:
+                axes[row_idx][col_idx].text(0.5, 0.5, "Invalid SMILES", 
+                                           ha='center', va='center')
+        except:
+            axes[row_idx][col_idx].text(0.5, 0.5, "Error", ha='center', va='center')
+        
+        axes[row_idx][col_idx].axis('off')
+    
+    # Hide empty subplots
+    for idx in range(len(compounds_df), n_rows * n_cols):
+        row_idx = idx // n_cols
+        col_idx = idx % n_cols
+        axes[row_idx][col_idx].axis('off')
+    
+    plt.tight_layout()
+    return fig
 
 # Modified analysis function to use enhanced display
 def run_mmp_analysis(df, min_occurrences=2):
@@ -589,8 +929,6 @@ def run_mmp_analysis(df, min_occurrences=2):
     st.info(f"✅ Found {len(mmp_df)} significant transformations.")
     
     return valid_df, row_df, delta_df, mmp_df
-
-# [Keep the main app logic mostly the same, but modify the display sections]
 
 # Main app logic
 if uploaded_file is not None:
