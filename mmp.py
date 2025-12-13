@@ -78,7 +78,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Title
-st.markdown('<h1 class="main-header">🧪 Matched Molecular Pair (MMP) Analysis Tool</h1>', unsafe_allow_html=True)
+st.markdown('<h1 class="main-header"> Matched Molecular Pair (MMP) Analysis Tool</h1>', unsafe_allow_html=True)
 
 # Try to import RDKit with error handling
 try:
@@ -1125,3 +1125,4 @@ st.markdown("""
     <p>For research use only. Always validate computational predictions with experimental data.</p>
 </div>
 """, unsafe_allow_html=True)
+
