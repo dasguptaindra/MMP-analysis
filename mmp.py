@@ -11,8 +11,7 @@ from itertools import combinations
 import useful_rdkit_utils as uru
 import matplotlib.pyplot as plt
 import seaborn as sns
-import io
-import base64
+import io, base64
 from rdkit.Chem.Draw import rdMolDraw2D
 
 # -----------------------------
@@ -41,41 +40,28 @@ def sort_fragments(mol):
     frag_num_atoms_list.sort(key=itemgetter(0), reverse=True)
     return [x[1] for x in frag_num_atoms_list]
 
-def rxn_to_base64_image(rxn, size=(300,150)):
-    drawer = rdMolDraw2D.MolDraw2DSVG(size[0], size[1])
+def rxn_to_base64_image(rxn):
+    drawer = rdMolDraw2D.MolDraw2DSVG(300,150)
     drawer.DrawReaction(rxn)
     drawer.FinishDrawing()
     svg = drawer.GetDrawingText()
-    b64 = base64.b64encode(svg.encode("utf-8")).decode("utf-8")
+    b64 = base64.b64encode(svg.encode()).decode()
     return f'<img src="data:image/svg+xml;base64,{b64}"/>'
 
-def stripplot_base64_image(delta_values):
+def stripplot_base64_image(deltas):
     fig, ax = plt.subplots(figsize=(3,2))
-    sns.stripplot(y=delta_values, ax=ax)
-    ax.set_ylabel("ΔpIC50")
+    sns.stripplot(y=deltas, ax=ax)
     plt.tight_layout()
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=150)
     plt.close(fig)
     buf.seek(0)
-    b64 = base64.b64encode(buf.read()).decode("utf-8")
+    b64 = base64.b64encode(buf.read()).decode()
     return f'<img src="data:image/png;base64,{b64}"/>'
-
-# -----------------------------
-# Safe wrappers
-# -----------------------------
-
-def safe_reaction(smarts):
-    try:
-        return AllChem.ReactionFromSmarts(smarts.replace("*-","*"), useSmiles=True)
-    except:
-        return None
 
 # -----------------------------
 # Sidebar
 # -----------------------------
-st.sidebar.header("⚙️ Settings")
-
 min_transform_occurrence = st.sidebar.slider(
     "Minimum MMP Occurrence", 2, 20, 5
 )
@@ -87,23 +73,26 @@ uploaded_file = st.sidebar.file_uploader(
 # -----------------------------
 # Main
 # -----------------------------
-if uploaded_file is not None:
+if uploaded_file:
 
     df = pd.read_csv(uploaded_file)
+
+    # 👇 DISPLAY SAFE COPY (NO RDKit OBJECTS)
+    st.subheader("Input Data")
     st.dataframe(df.head())
 
+    # Internal RDKit processing
     df["mol"] = df.SMILES.apply(Chem.MolFromSmiles)
     df["mol"] = df.mol.apply(uru.get_largest_fragment)
 
     # Fragmentation
     row_list = []
     for smiles, name, pIC50, mol in df.values:
-        frag_list = FragmentMol(mol, maxCuts=1)
-        for _, frag_mol in frag_list:
-            pair_list = sort_fragments(frag_mol)
+        for _, frag_mol in FragmentMol(mol, maxCuts=1):
+            pair = sort_fragments(frag_mol)
             row_list.append(
                 [smiles] +
-                [Chem.MolToSmiles(x) for x in pair_list] +
+                [Chem.MolToSmiles(x) for x in pair] +
                 [name, pIC50]
             )
 
@@ -113,49 +102,47 @@ if uploaded_file is not None:
     )
 
     # Δ calculation
-    delta_list = []
-    for k, v in row_df.groupby("Core"):
+    delta_rows = []
+    for _, v in row_df.groupby("Core"):
         if len(v) > 2:
-            for a, b in combinations(range(len(v)), 2):
+            for a,b in combinations(range(len(v)),2):
                 ra, rb = v.iloc[a], v.iloc[b]
                 if ra.SMILES == rb.SMILES:
                     continue
                 ra, rb = sorted([ra, rb], key=lambda x: x.SMILES)
-                delta = rb.pIC50 - ra.pIC50
-                delta_list.append(
+                delta_rows.append(
                     list(ra.values) +
                     list(rb.values) +
-                    [f"{ra.R_group.replace('*','*-')}>>{rb.R_group.replace('*','*-')}", delta]
+                    [f"{ra.R_group.replace('*','*-')}>>{rb.R_group.replace('*','*-')}",
+                     rb.pIC50 - ra.pIC50]
                 )
 
-    delta_df = pd.DataFrame(delta_list, columns=[
+    delta_df = pd.DataFrame(delta_rows, columns=[
         "SMILES_1","Core_1","R_group_1","Name_1","pIC50_1",
         "SMILES_2","Core_2","Rgroup_2","Name_2","pIC50_2",
         "Transform","Delta"
     ])
 
-    # Aggregate MMPs
+    # MMP aggregation
     mmp_rows = []
     for k, v in delta_df.groupby("Transform"):
         if len(v) > min_transform_occurrence:
-            mmp_rows.append([k, len(v), np.array(v.Delta)])
+            mmp_rows.append([k, len(v), v.Delta.values])
 
     mmp_df = pd.DataFrame(mmp_rows, columns=["Transform","Count","Deltas"])
     mmp_df["mean_delta"] = mmp_df.Deltas.apply(np.mean)
-    mmp_df["rxn"] = mmp_df.Transform.apply(safe_reaction)
-
-    # ---- CRITICAL FIX ----
-    # Remove NumPy arrays BEFORE Streamlit rendering
-    mmp_df["MMP Transform"] = mmp_df["rxn"].apply(
-        lambda x: rxn_to_base64_image(x) if x else ""
+    mmp_df["rxn"] = mmp_df.Transform.apply(
+        lambda x: AllChem.ReactionFromSmarts(x.replace("*-","*"), useSmiles=True)
     )
+
+    # Render visuals
+    mmp_df["MMP Transform"] = mmp_df["rxn"].apply(rxn_to_base64_image)
     mmp_df["Delta Distribution"] = mmp_df["Deltas"].apply(stripplot_base64_image)
 
-    # Drop problematic columns
-    mmp_df = mmp_df.drop(columns=["Deltas","rxn"])
+    # 🔥 DROP ALL NON-SERIALIZABLE OBJECTS
+    mmp_df = mmp_df.drop(columns=["rxn","Deltas"])
 
-    mmp_df.sort_values("mean_delta", inplace=True)
-
+    st.subheader("Final MMP Results")
     st.markdown(
         mmp_df[["MMP Transform","Count","mean_delta","Delta Distribution"]]
         .round(2)
@@ -164,5 +151,4 @@ if uploaded_file is not None:
     )
 
 else:
-    st.info("Upload a CSV file to start.")
-
+    st.info("Upload a CSV to start analysis.")
