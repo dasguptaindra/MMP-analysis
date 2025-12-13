@@ -990,7 +990,7 @@ else:
     
     ### Feature: Configurable Number of Cuts
     
-    You can now choose how many bonds to break when fragmenting molecules:
+    You can choose how many bonds to break when fragmenting molecules:
     
     - **1 cut**: Simple R-group replacements (traditional MMP)
     - **2-3 cuts**: Scaffold hopping and linker modifications
@@ -1028,6 +1028,13 @@ else:
     1. **NumPy compatibility**: Install `numpy<2` with `pip install "numpy<2"`
     2. **Invalid SMILES**: Check your SMILES strings are valid
     3. **Memory issues with many cuts**: Reduce max cuts or use smarter fragmentation
+
+    ### References:
+    - Hussain, J. & Rea, C. (2010). Computationally efficient algorithm to identify matched molecular pairs (MMPs) in large data sets. *Journal of Chemical Information and Modeling*, 50(3), 339-348. https://doi.org/10.1021/ci900450m
+    - Dossetter, A. G., Griffen, E. J., & Leach, A. G. (2013). Matched molecular pair analysis in drug discovery. *Drug Discovery Today*, 18(15-16), 724-731. https://doi.org/10.1016/j.drudis.2013.03.003
+    - Wassermann, A. M., Dimova, D., Iyer, P., & Bajorath, J., Advances in computational medicinal chemistry: matched molecular pair analysis. Drug Development Research, 73 (2012): 518-527. https://doi.org/10.1002/ddr.21045
+    - Tyrchan, Christian, and Emma Evertsson. "Matched molecular pair analysis in short: algorithms, applications and limitations," Computational and Structural Biotechnology Journal 15 (2017): 86-90 https://doi.org/10.1016/j.csbj.2016.12.003
+    
     
     ⬅️ **Upload a CSV file in the sidebar to get started!**
     """)
@@ -1036,8 +1043,9 @@ else:
 st.markdown("---")
 st.markdown("""
 <div style="text-align: center; color: #6B7280; font-size: 0.9rem;">
-    <p>MMP Analysis Tool v2.0 | Configurable Cuts Edition | Built with Streamlit, RDKit, and Pandas</p>
+    <p>MMP Analysis Tool v1.0 | Configurable Cuts Edition | Built with Streamlit, RDKit, and Pandas</p>
     <p>For research use only. Always validate computational predictions with experimental data.</p>
 </div>
 """, unsafe_allow_html=True)
+
 
