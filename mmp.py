@@ -9,7 +9,6 @@ warnings.filterwarnings("ignore")
 
 # RDKit
 from rdkit import Chem
-from rdkit.Chem import Draw
 from rdkit.Chem.rdMMPA import FragmentMol
 
 # -------------------- PAGE CONFIG --------------------
@@ -24,7 +23,10 @@ st.title("🧪 Matched Molecular Pair (MMP) Analysis Tool")
 # -------------------- SIDEBAR --------------------
 with st.sidebar:
     uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
-    min_occurrence = st.slider("Minimum transform occurrences", 1, 20, 5)
+    min_occurrence = st.slider(
+        "Minimum transform occurrences",
+        1, 20, 5
+    )
 
 # -------------------- LOAD DATA --------------------
 @st.cache_data
@@ -37,52 +39,57 @@ def load_data(file):
 
     mols = []
     for s in df.SMILES:
-        m = Chem.MolFromSmiles(str(s))
-        mols.append(m)
+        mols.append(Chem.MolFromSmiles(str(s)))
 
     df["mol"] = mols
     df = df[df.mol.notna()].copy()
-    return df
 
+    return df
 
 # -------------------- MMP ANALYSIS --------------------
 def perform_mmp_analysis(df, min_occurrence):
 
-    # ---------- STEP 1: FRAGMENTATION (RDKit MMPA) ----------
+    # ---------- STEP 1: FRAGMENTATION ----------
     row_list = []
 
     for i, row in df.iterrows():
         mol = row.mol
-        name = row.get("Name", f"CMPD_{i}")
-        pIC50 = row.pIC50
         smiles = row.SMILES
+        pIC50 = row.pIC50
+        name = row.get("Name", f"CMPD_{i}")
 
-       frags = FragmentMol(mol, maxCuts=1, resultsAsMols=True)
+        frags = FragmentMol(
+            mol,
+            maxCuts=1,
+            resultsAsMols=True
+        )
 
-for core, chains in frags:
+        for core, chains in frags:
 
-    # 🔒 SAFETY CHECKS (CRITICAL)
-    if core is None:
-        continue
-    if not chains or chains[0] is None:
-        continue
+            # SAFETY CHECKS
+            if core is None:
+                continue
+            if not chains or chains[0] is None:
+                continue
 
-    core_smiles = Chem.MolToSmiles(core)
-    r_smiles = Chem.MolToSmiles(chains[0])
+            core_smiles = Chem.MolToSmiles(core)
+            r_smiles = Chem.MolToSmiles(chains[0])
 
-    row_list.append([
-        smiles,
-        core_smiles,
-        r_smiles,
-        name,
-        pIC50
-    ])
+            row_list.append([
+                smiles,
+                core_smiles,
+                r_smiles,
+                name,
+                pIC50
+            ])
 
-    # 🔒 LOCK STRUCTURE (CRITICAL)
     row_df = pd.DataFrame(
         row_list,
         columns=["SMILES", "Core", "R_group", "Name", "pIC50"]
     )
+
+    if row_df.empty:
+        return None, None
 
     # ---------- STEP 2: EXACT ORIGINAL DELTA LOGIC ----------
     delta_list = []
@@ -145,7 +152,6 @@ for core, chains in frags:
 
     return delta_df, mmp_df
 
-
 # -------------------- MAIN --------------------
 if uploaded_file:
     df = load_data(uploaded_file)
@@ -153,24 +159,27 @@ if uploaded_file:
     if df is not None:
         st.success(f"Loaded {len(df)} molecules")
 
-        delta_df, mmp_df = perform_mmp_analysis(df, min_occurrence)
+        delta_df, mmp_df = perform_mmp_analysis(
+            df,
+            min_occurrence
+        )
 
-        st.metric("Total MMP pairs", len(delta_df))
+        if delta_df is not None:
+            st.metric("Total MMP pairs", len(delta_df))
+            st.subheader("All MMP Pairs")
+            st.dataframe(delta_df)
 
         if mmp_df is not None:
             st.metric("Unique transforms", len(mmp_df))
-
             st.subheader("Top Transforms")
             st.dataframe(
-                mmp_df.sort_values("mean_delta", ascending=False)
+                mmp_df
+                .sort_values("mean_delta", ascending=False)
                 [["Transform", "Count", "mean_delta"]]
                 .round(3)
             )
-
-            st.subheader("All Pairs")
-            st.dataframe(delta_df)
+        else:
+            st.warning("No transforms passed the occurrence threshold")
 
 else:
-    st.info("Upload a CSV file to start")
-
-
+    st.info("⬅ Upload a CSV file to start")
