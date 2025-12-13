@@ -412,6 +412,143 @@ def draw_molecule_pair(mol1, mol2, name1="Compound 1", name2="Compound 2",
         img = MolsToGridImage(mols, molsPerRow=2, subImgSize=size, legends=labels)
         return img
 
+def parse_transform_to_smiles(transform_str):
+    """Convert a transformation string like C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.F.N.O.O.O.O.S>>C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.C.N.N.O.O.O.O.S.S 
+    to proper SMILES notation."""
+    
+    if '>>' not in transform_str:
+        return None, None, None
+    
+    reactant_str, product_str = transform_str.split('>>')
+    
+    # Parse dot-separated fragments
+    def fragments_to_smiles(fragment_str):
+        fragments = fragment_str.split('.')
+        return fragments
+    
+    reactant_fragments = fragments_to_smiles(reactant_str)
+    product_fragments = fragments_to_smiles(product_str)
+    
+    # Find the largest common fragment (likely the core)
+    common_fragments = list(set(reactant_fragments) & set(product_fragments))
+    
+    # Get changing fragments (R-groups)
+    reactant_r_groups = [f for f in reactant_fragments if f not in common_fragments]
+    product_r_groups = [f for f in product_fragments if f not in common_fragments]
+    
+    # Create full molecules by combining
+    if common_fragments:
+        # Use the largest common fragment as core
+        common_core = max(common_fragments, key=len) if common_fragments else ""
+        
+        # Create reactant molecule: core + R-groups
+        reactant_full = common_core
+        if reactant_r_groups:
+            # Try to create a proper molecule with attachment points
+            # For simplicity, we'll just combine with dots
+            reactant_full = f"{common_core}.{'.'.join(reactant_r_groups)}"
+        
+        # Create product molecule: core + R-groups
+        product_full = common_core
+        if product_r_groups:
+            product_full = f"{common_core}.{'.'.join(product_r_groups)}"
+        
+        # Create simplified transformation
+        # Extract just the changing parts
+        reactant_simple = '.'.join(reactant_r_groups) if reactant_r_groups else "*"
+        product_simple = '.'.join(product_r_groups) if product_r_groups else "*"
+        
+        return reactant_full, product_full, f"{reactant_simple}>>{product_simple}"
+    
+    # If no common fragments found, use the full strings
+    return reactant_str, product_str, transform_str
+
+def visualize_transformation_enhanced(transform_str, compounds_df=None, 
+                                     example_compounds=None, size=(400, 200)):
+    """Create an enhanced visualization of the transformation with proper chemical structures"""
+    
+    # Try to parse the transformation to proper SMILES
+    reactant_smiles, product_smiles, simple_transform = parse_transform_to_smiles(transform_str)
+    
+    try:
+        # Create reactant and product molecules
+        reactant_mol = Chem.MolFromSmiles(reactant_smiles) if reactant_smiles else None
+        product_mol = Chem.MolFromSmiles(product_smiles) if product_smiles else None
+        
+        if reactant_mol and product_mol:
+            # Both molecules are valid - draw them side by side
+            from rdkit.Chem.Draw import MolsToGridImage
+            
+            # Prepare molecules for display
+            mols = [reactant_mol, product_mol]
+            legends = ["Reactant (Before)", "Product (After)"]
+            
+            # Draw the molecules
+            img = MolsToGridImage(mols, molsPerRow=2, subImgSize=(size[0]//2, size[1]), 
+                                 legends=legends)
+            return img
+        
+        elif reactant_mol or product_mol:
+            # Only one is valid
+            from rdkit.Chem.Draw import MolsToGridImage
+            valid_mols = []
+            valid_legends = []
+            
+            if reactant_mol:
+                valid_mols.append(reactant_mol)
+                valid_legends.append("Reactant (Before)")
+            
+            if product_mol:
+                valid_mols.append(product_mol)
+                valid_legends.append("Product (After)")
+            
+            img = MolsToGridImage(valid_mols, molsPerRow=len(valid_mols), 
+                                 subImgSize=(size[0]//len(valid_mols), size[1]), 
+                                 legends=valid_legends)
+            return img
+        
+        else:
+            # Try to create from simple fragments
+            if '>>' in transform_str:
+                reactant_part, product_part = transform_str.split('>>')
+                
+                # Try to parse individual fragments
+                reactant_frags = reactant_part.split('.')
+                product_frags = product_part.split('.')
+                
+                # Try to create molecules from each fragment
+                reactant_mols = []
+                product_mols = []
+                
+                for frag in reactant_frags[:3]:  # Limit to first 3 fragments
+                    mol = Chem.MolFromSmiles(frag)
+                    if mol:
+                        reactant_mols.append(mol)
+                
+                for frag in product_frags[:3]:  # Limit to first 3 fragments
+                    mol = Chem.MolFromSmiles(frag)
+                    if mol:
+                        product_mols.append(mol)
+                
+                if reactant_mols or product_mols:
+                    # Combine all fragments
+                    all_mols = reactant_mols + product_mols
+                    all_legends = ["Fragment"] * len(all_mols)
+                    
+                    if len(all_mols) > 0:
+                        n_cols = min(4, len(all_mols))
+                        img = MolsToGridImage(all_mols, molsPerRow=n_cols, 
+                                             subImgSize=(200, 200), 
+                                             legends=all_legends)
+                        return img
+            
+            # Fallback to text visualization
+            return create_text_visualization(transform_str, size)
+            
+    except Exception as e:
+        # Create text-based visualization as fallback
+        return create_text_visualization(f"{transform_str[:50]}...", size)
+
 def create_text_visualization(text, size):
     """Create a text-based visualization as fallback"""
     from PIL import Image, ImageDraw, ImageFont
@@ -437,54 +574,6 @@ def create_text_visualization(text, size):
         y_offset += 20
     
     return img
-
-def visualize_transformation_enhanced(transform_str, compounds_df=None, 
-                                     example_compounds=None, size=(400, 200)):
-    """Create an enhanced visualization of the transformation"""
-    try:
-        if '>>' in transform_str:
-            reactant_str, product_str = transform_str.split('>>')
-            
-            # Create a reaction visualization
-            rxn_smarts = f"[*:1]{reactant_str}>>[*:1]{product_str}"
-            
-            try:
-                rxn = AllChem.ReactionFromSmarts(rxn_smarts)
-                
-                # Create a more detailed image
-                drawer = rdMolDraw2D.MolDraw2DCairo(size[0], size[1])
-                drawer.DrawReaction(rxn)
-                drawer.FinishDrawing()
-                
-                # Get PNG data
-                png_data = drawer.GetDrawingText()
-                
-                # Convert to PIL Image
-                img = Image.open(io.BytesIO(png_data))
-                return img
-                
-            except:
-                # Fallback: Show reactants and products separately
-                from rdkit.Chem.Draw import MolsToGridImage
-                
-                # Create placeholder molecules
-                reactant_mol = Chem.MolFromSmiles(f"[*]{reactant_str}")
-                product_mol = Chem.MolFromSmiles(f"[*]{product_str}")
-                
-                if reactant_mol and product_mol:
-                    mols = [reactant_mol, product_mol]
-                    img = MolsToGridImage(mols, molsPerRow=2, 
-                                         subImgSize=(size[0]//2, size[1]),
-                                         legends=["Reactant", "Product"])
-                    return img
-                else:
-                    # Create text-based visualization
-                    return create_text_visualization(transform_str, size)
-        else:
-            return create_text_visualization(transform_str, size)
-            
-    except Exception as e:
-        return create_text_visualization(f"Error: {str(e)[:50]}", size)
 
 def rxn_to_image(rxn_smarts, width=300, height=150):
     """Convert reaction SMARTS to PIL Image"""
@@ -594,14 +683,20 @@ def display_transformation_with_examples(transform_str, delta_df, compounds_df,
             # Display the transformation
             st.subheader("Transformation")
             
-            # Show SMILES if enabled
+            # Parse and display the transformation in a better format
+            reactant_smiles, product_smiles, simple_transform = parse_transform_to_smiles(transform_str)
+            
+            st.markdown("**Full Transformation:**")
             if show_smiles:
-                st.code(transform_str, language="text")
+                # Display in a more readable format
+                st.code(f"Before: {reactant_smiles[:100]}...", language="text")
+                st.code(f"After:  {product_smiles[:100]}...", language="text")
             
             # Show molecule visualization if enabled
             if show_molecules:
+                st.markdown("**Structural Change:**")
                 img = visualize_transformation_enhanced(transform_str, size=(image_size, image_size//2))
-                st.image(img, caption="Structural Transformation")
+                st.image(img, caption="Transformation Visualization")
         
         with col2:
             # Display statistics
@@ -682,6 +777,12 @@ def display_transformation_with_examples(transform_str, delta_df, compounds_df,
                         st.image(comparison_img)
                     except:
                         pass
+                
+                # Also show the specific transformation for this pair
+                st.markdown("**Transformation for this pair:**")
+                if 'Transform' in pair:
+                    img = visualize_transformation_enhanced(pair['Transform'], size=(400, 150))
+                    st.image(img, caption="Specific transformation")
     
     with tab3:
         # Detailed statistics
