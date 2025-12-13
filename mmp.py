@@ -32,7 +32,6 @@ st.title("🧪 Matched Molecular Pair (MMP) Analysis")
 def get_largest_fragment(mol):
     """
     Standardizes the molecule by removing salts and keeping the largest organic fragment.
-    Replaces useful_rdkit_utils.get_largest_fragment
     """
     if mol is None:
         return None
@@ -56,12 +55,18 @@ def sort_fragments(mol):
     Splits the fragmented molecule into constituent parts 
     and returns them sorted by size (largest first -> Core).
     """
-    frag_list = list(Chem.GetMolFrags(mol, asMols=True))
-    [remove_map_nums(x) for x in frag_list]
-    # Sort by number of atoms (descending)
-    frag_num_atoms_list = [(x.GetNumAtoms(), x) for x in frag_list]
-    frag_num_atoms_list.sort(key=itemgetter(0), reverse=True)
-    return [x[1] for x in frag_num_atoms_list]
+    if mol is None:
+        return []
+    try:
+        frag_list = list(Chem.GetMolFrags(mol, asMols=True))
+        for x in frag_list:
+            remove_map_nums(x)
+        # Sort by number of atoms (descending)
+        frag_num_atoms_list = [(x.GetNumAtoms(), x) for x in frag_list]
+        frag_num_atoms_list.sort(key=itemgetter(0), reverse=True)
+        return [x[1] for x in frag_num_atoms_list]
+    except Exception:
+        return []
 
 def rxn_to_base64_image(rxn):
     """Generates a base64 encoded SVG of the reaction."""
@@ -111,7 +116,11 @@ with st.sidebar:
 # -----------------------------
 if uploaded_file:
     # 1. Load Data
-    df = pd.read_csv(uploaded_file)
+    try:
+        df = pd.read_csv(uploaded_file)
+    except Exception as e:
+        st.error(f"Error reading CSV: {e}")
+        st.stop()
     
     # 2. Column Mapping (Robustness)
     st.subheader("1. Data Mapping")
@@ -141,20 +150,32 @@ if uploaded_file:
             # Fragmentation Loop
             row_list = []
             
-            # Using iterrows for safety with column names, though slower than values
             for idx, row in df.iterrows():
                 mol = row["mol"]
                 smiles = row[smiles_col]
                 name = row[name_col]
                 pIC50 = row[pic50_col]
                 
-                # Single cut fragmentation
                 if mol:
-                    # FragmentMol returns (num_cuts, mol_with_dummies)
-                    frags = FragmentMol(mol, maxCuts=1, resultsAsMols=True)
-                    
-                    for _, frag_mol in frags:
+                    # Robust FragmentMol call
+                    try:
+                        # resultsAsMols=True returns the fragmented molecule directly (with dummy atoms)
+                        # or a sequence of them depending on RDKit version.
+                        frags = FragmentMol(mol, maxCuts=1, resultsAsMols=True)
+                    except Exception:
+                        continue
+
+                    # Iterate safely over whatever FragmentMol returns
+                    for frag_item in frags:
+                        # Sometimes it returns (num_cuts, mol), sometimes just mol. Check type:
+                        if isinstance(frag_item, tuple):
+                            frag_mol = frag_item[1] # Use the molecule part
+                        else:
+                            frag_mol = frag_item
+                        
+                        # Now process the fragmented molecule
                         pair = sort_fragments(frag_mol)
+                        
                         # We only want pairs (Core + R-Group)
                         if len(pair) == 2:
                             core_smi = Chem.MolToSmiles(pair[0]) # Largest is core
@@ -170,7 +191,7 @@ if uploaded_file:
             )
 
         if row_df.empty:
-            st.error("No fragments generated. Check if your molecules are valid or increase diversity.")
+            st.error("No valid fragments generated. Please check if your SMILES are valid or increase the dataset size.")
         else:
             # 4. Delta Calculation
             with st.spinner("Calculating Deltas..."):
@@ -187,13 +208,11 @@ if uploaded_file:
                             ra = group.iloc[i]
                             rb = group.iloc[j]
                             
-                            # Avoid self-matches (shouldn't happen with combinations but good safety)
+                            # Avoid self-matches and identical R-groups
                             if ra.R_group == rb.R_group:
                                 continue
                             
                             # Canonical ordering by SMILES to ensure A>>B is same as B>>A in direction logic
-                            # Here we define direction arbitrarily or by pIC50. 
-                            # Let's sort by R-group SMILES to handle "Transform" string consistently
                             mols_sorted = sorted([ra, rb], key=lambda x: x.R_group)
                             r1, r2 = mols_sorted[0], mols_sorted[1]
                             
@@ -242,7 +261,7 @@ if uploaded_file:
                     # Formatting for Display
                     display_cols = ["MMP Transform", "Count", "mean_delta", "Delta Distribution"]
                     
-                    # Sort by absolute impact or count
+                    # Sort by count
                     mmp_df = mmp_df.sort_values("Count", ascending=False)
 
                     # Generate HTML Table
