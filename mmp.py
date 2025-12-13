@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 from rdkit import Chem
@@ -26,7 +27,7 @@ st.set_page_config(
 st.title("🧪 Matched Molecular Pair (MMP) Analysis")
 
 # -----------------------------
-# Helper functions
+# Helper functions (UNCHANGED LOGIC)
 # -----------------------------
 
 def remove_map_nums(mol):
@@ -76,12 +77,9 @@ uploaded_file = st.sidebar.file_uploader(
 if uploaded_file:
 
     df = pd.read_csv(uploaded_file)
-
-    # 👇 DISPLAY SAFE COPY (NO RDKit OBJECTS)
     st.subheader("Input Data")
     st.dataframe(df.head())
 
-    # Internal RDKit processing
     df["mol"] = df.SMILES.apply(Chem.MolFromSmiles)
     df["mol"] = df.mol.apply(uru.get_largest_fragment)
 
@@ -101,7 +99,7 @@ if uploaded_file:
         columns=["SMILES","Core","R_group","Name","pIC50"]
     )
 
-    # Δ calculation
+    # Delta calculation
     delta_rows = []
     for _, v in row_df.groupby("Core"):
         if len(v) > 2:
@@ -113,8 +111,10 @@ if uploaded_file:
                 delta_rows.append(
                     list(ra.values) +
                     list(rb.values) +
-                    [f"{ra.R_group.replace('*','*-')}>>{rb.R_group.replace('*','*-')}",
-                     rb.pIC50 - ra.pIC50]
+                    [
+                        f"{ra.R_group.replace('*','*-')}>>{rb.R_group.replace('*','*-')}",
+                        rb.pIC50 - ra.pIC50
+                    ]
                 )
 
     delta_df = pd.DataFrame(delta_rows, columns=[
@@ -123,7 +123,7 @@ if uploaded_file:
         "Transform","Delta"
     ])
 
-    # MMP aggregation
+    # Aggregate MMPs
     mmp_rows = []
     for k, v in delta_df.groupby("Transform"):
         if len(v) > min_transform_occurrence:
@@ -135,20 +135,25 @@ if uploaded_file:
         lambda x: AllChem.ReactionFromSmarts(x.replace("*-","*"), useSmiles=True)
     )
 
-    # Render visuals
+    # Build HTML columns
     mmp_df["MMP Transform"] = mmp_df["rxn"].apply(rxn_to_base64_image)
     mmp_df["Delta Distribution"] = mmp_df["Deltas"].apply(stripplot_base64_image)
 
-    # 🔥 DROP ALL NON-SERIALIZABLE OBJECTS
-    mmp_df = mmp_df.drop(columns=["rxn","Deltas"])
-
-    st.subheader("Final MMP Results")
-    st.markdown(
+    # FINAL DISPLAY TABLE (HTML ONLY)
+    html_table = (
         mmp_df[["MMP Transform","Count","mean_delta","Delta Distribution"]]
         .round(2)
-        .to_html(escape=False),
-        unsafe_allow_html=True
+        .to_html(escape=False, index=False)
+    )
+
+    st.subheader("Final MMP Results")
+
+    # 🚀 THIS IS THE KEY LINE (NO STREAMLIT SERIALIZATION)
+    components.html(
+        html_table,
+        height=900,
+        scrolling=True
     )
 
 else:
-    st.info("Upload a CSV to start analysis.")
+    st.info("Upload a CSV file to start analysis.")
