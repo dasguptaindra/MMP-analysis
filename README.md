@@ -5,9 +5,8 @@
 Explore matched molecular pair (MMP) analysis interactively using the Streamlit-based web tool.
 
 👉 **Launch the App**  
-[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://mmp-analysis-vvper6mar624h8dkxby5pf.streamlit.app/)
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_red.svg)](https://mmp-analysis-vvper6mar624h8dkxby5pf.streamlit.app/)
 
-🌐 https://mmp-analysis-vvper6mar624h8dkxby5pf.streamlit.app/
 
 ⚠️ **Limitations**
 
