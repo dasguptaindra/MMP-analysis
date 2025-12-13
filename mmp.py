@@ -1,4 +1,3 @@
-# app.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -173,10 +172,16 @@ def run_mmp_with_progress(processed_df, min_occ):
     return row_df, delta_df, mmp_df
 
 # =========================================================
-# Main execution remains the same...
+# Streamlit UI
 # =========================================================
+st.set_page_config(page_title="MMP Analysis", page_icon="🧪", layout="wide")
 
-# The Streamlit UI code remains mostly the same, just update the processing:
+st.title("🧪 MMP Analysis Tool")
+st.write("Analyze Matched Molecular Pairs from your dataset")
+
+# File upload
+uploaded = st.file_uploader("Upload CSV file", type=["csv"])
+
 if uploaded:
     df = pd.read_csv(uploaded)
     
@@ -188,12 +193,20 @@ if uploaded:
     activity_col = st.selectbox("Activity column", cols)
     name_col = st.selectbox("Name column (optional)", ["None"] + cols)
     
+    min_occ = st.number_input(
+        "Minimum transform occurrences",
+        min_value=1,
+        value=2
+    )
+    
+    run_button = st.button("Run MMP Analysis")
+    
     if run_button:
         with st.spinner("Preparing molecules..."):
             proc_df = df.copy()
             proc_df["mol"] = proc_df[smiles_col].apply(Chem.MolFromSmiles)
             proc_df = proc_df[proc_df.mol.notnull()]
-            proc_df["mol"] = proc_df.mol.apply(get_largest_fragment)  # Use corrected function
+            proc_df["mol"] = proc_df.mol.apply(get_largest_fragment)
             
             proc_df = proc_df.rename(columns={
                 smiles_col: "SMILES",
@@ -236,17 +249,56 @@ if uploaded:
             st.dataframe(row_df, use_container_width=True)
 
             st.subheader("📥 Download Results")
-            st.download_button(
-                "Download MMP Summary",
-                mmp_df.to_csv(index=False),
-                "mmp_summary.csv"
-            )
-            st.download_button(
-                "Download All Pairs",
-                delta_df.to_csv(index=False),
-                "mmp_pairs.csv"
-            )
+            col1, col2 = st.columns(2)
+            with col1:
+                st.download_button(
+                    "Download MMP Summary",
+                    mmp_df.to_csv(index=False),
+                    "mmp_summary.csv",
+                    "text/csv"
+                )
+            with col2:
+                st.download_button(
+                    "Download All Pairs",
+                    delta_df.to_csv(index=False),
+                    "mmp_pairs.csv",
+                    "text/csv"
+                )
 
 else:
     st.info("👈 Upload a CSV file to begin")
-        
+    
+# =========================================================
+# Sidebar with instructions
+# =========================================================
+with st.sidebar:
+    st.header("📋 Instructions")
+    st.markdown("""
+    1. **Upload a CSV file** containing:
+       - SMILES strings
+       - Activity values (numeric)
+       - Optional: Molecule names
+    
+    2. **Select columns** for:
+       - SMILES
+       - Activity
+       - Name (optional)
+    
+    3. **Set minimum occurrences** for transforms
+    
+    4. **Run analysis** and explore results
+    
+    **Expected CSV format:**
+    ```
+    Name,SMILES,Activity
+    Molecule1,CC(=O)Oc1ccc...,6.5
+    Molecule2,CC(=O)Nc1ccc...,7.2
+    ```
+    """)
+    
+    st.header("⚙️ Settings")
+    st.markdown("""
+    - **Minimum transform occurrences**: Only show transforms seen at least this many times
+    - **Fragment size filter**: Keeps fragments > 67% of original molecule size
+    - **R-group handling**: Dummy atoms converted to hydrogens
+    """)
