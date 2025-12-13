@@ -13,7 +13,6 @@ from tqdm import tqdm
 from operator import itemgetter
 from itertools import combinations
 from io import BytesIO
-from PIL import Image
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
@@ -179,66 +178,6 @@ if RDKIT_AVAILABLE:
         if frags:
             return max(frags, key=lambda x: x.GetNumAtoms())
         return mol
-    
-    def generate_fragments_scaffold_based(mol):
-        """
-        Generate fragments using scaffold-based approach
-        """
-        # Generate molecule fragments
-        frag_list = FragmentMol(mol)
-        # Flatten the output
-        flat_frag_list = [x for x in itertools.chain(*frag_list) if x]
-        # Extract largest fragments
-        flat_frag_list = [get_largest_fragment(x) for x in flat_frag_list]
-        
-        # Keep fragments with reasonable size
-        num_mol_atoms = mol.GetNumAtoms()
-        flat_frag_list = [x for x in flat_frag_list if x.GetNumAtoms() / num_mol_atoms > 0.67]
-        
-        # Remove atom map numbers
-        flat_frag_list = [cleanup_fragment(x) for x in flat_frag_list]
-        
-        results = []
-        for frag_mol, rgroup_count in flat_frag_list:
-            # For single cuts, we expect rgroup_count to be 1
-            if rgroup_count == 1:
-                # Find attachment point and separate
-                for atom in frag_mol.GetAtoms():
-                    if atom.GetAtomicNum() == 1 and atom.GetIsotope() == 0:
-                        # This is our attachment point hydrogen
-                        # Create R-group by removing this H
-                        emol = Chem.EditableMol(frag_mol)
-                        neighbors = atom.GetNeighbors()
-                        if neighbors:
-                            parent_idx = neighbors[0].GetIdx()
-                            emol.RemoveAtom(atom.GetIdx())
-                            new_mol = emol.GetMol()
-                            
-                            # The attachment point atom should now be a wildcard
-                            new_atom = new_mol.GetAtomWithIdx(parent_idx)
-                            new_atom.SetAtomicNum(0)
-                            
-                            # Convert to SMILES and split
-                            smiles = Chem.MolToSmiles(new_mol)
-                            if '*' in smiles:
-                                # Try to split into core and R-group
-                                # This is simplified - you may need more sophisticated logic
-                                core_smiles = smiles.replace('[*]', '')
-                                if core_smiles:
-                                    core_mol = Chem.MolFromSmiles(core_smiles)
-                                    if core_mol:
-                                        results.append({
-                                            'core_mol': core_mol,
-                                            'rgroup_mol': Chem.MolFromSmiles('[*]H'),
-                                            'core_smiles': core_smiles + '[*]',
-                                            'rgroup_smiles': '[*]H',
-                                            'core_size': core_mol.GetNumAtoms(),
-                                            'rgroup_size': 1,
-                                            'bond_type': 'Single',
-                                            'is_ring': False,
-                                            'is_terminal': False
-                                        })
-        return results
 
 # Sidebar configuration
 with st.sidebar:
@@ -246,6 +185,20 @@ with st.sidebar:
     
     # File upload
     uploaded_file = st.file_uploader("Upload CSV file", type=['csv'])
+    
+    # Initialize variables
+    min_mw = 100.0
+    max_mw = 500.0
+    min_core_atoms = 10
+    max_rgroup_atoms = 20
+    min_pairs_per_core = 3
+    min_transform_occurrence = 2
+    mmpa_method = "Exhaustive Single Cut"
+    n_top_transforms = 10
+    show_fragment_images = True
+    show_detailed_debug = False
+    generate_mmp_images = True
+    export_all_data = True
     
     if uploaded_file and RDKIT_AVAILABLE:
         st.markdown("### ⚙️ Analysis Parameters")
@@ -320,7 +273,7 @@ with st.sidebar:
 # Helper functions (continued)
 if RDKIT_AVAILABLE:
     @st.cache_data
-    def load_and_preprocess_data(file):
+    def load_and_preprocess_data(file, min_mw=100.0, max_mw=500.0):
         """Load and preprocess CSV data"""
         if file is None:
             return None
@@ -350,11 +303,10 @@ if RDKIT_AVAILABLE:
             molecules = []
             valid_indices = []
             
-            # Simplified version - no MW filtering at all
-            Chem.SanitizeMol(mol)
-            molecules.append(mol)
-            valid_indices.append(idx)
-                        
+            for idx, row in df.iterrows():
+                try:
+                    mol = Chem.MolFromSmiles(row['SMILES'])
+                    if mol is not None:
                         # Check molecular weight
                         mw = Descriptors.MolWt(mol)
                         if min_mw <= mw <= max_mw:
@@ -394,13 +346,11 @@ if RDKIT_AVAILABLE:
         """Generate fragments based on selected method"""
         if method == "Exhaustive Single Cut":
             return generate_fragments_exhaustive(mol)
-        elif method == "Scaffold-Based":
-            return generate_fragments_scaffold_based(mol)
         else:
-            # Standard method - conservative cuts
-            return generate_fragments_exhaustive(mol)[:10]  # Limit to top 10
+            # For other methods, use exhaustive but limit results
+            return generate_fragments_exhaustive(mol)
     
-    def perform_mmp_analysis_single_cut(df, method, min_pairs_per_core, show_debug=False):
+    def perform_mmp_analysis_single_cut(df, method, min_pairs_per_core, min_core_atoms, max_rgroup_atoms, show_debug=False):
         """Perform MMP analysis with single cuts only"""
         
         st.info(f"Starting MMP analysis using {method} method...")
@@ -418,20 +368,23 @@ if RDKIT_AVAILABLE:
             mol = row['mol']
             fragments = generate_fragments_single_cut(mol, method)
             
+            # Filter fragments by size
+            filtered_fragments = []
+            for frag in fragments:
+                if (frag['core_size'] >= min_core_atoms and 
+                    frag['rgroup_size'] <= max_rgroup_atoms):
+                    filtered_fragments.append(frag)
+            
             compound_fragments[idx] = {
                 'name': row['Name'],
                 'smiles': row['SMILES'],
                 'pIC50': row['pIC50'],
-                'fragments': fragments,
+                'fragments': filtered_fragments,
                 'mol': mol
             }
             
-            all_fragments.extend(fragments)
+            all_fragments.extend(filtered_fragments)
             
-            # Show fragment visualization for first few compounds
-            if idx < 3 and show_fragment_images and fragments:
-                visualize_fragments(row['Name'], mol, fragments)
-        
         if not all_fragments:
             st.error(f"No fragments generated with {method} method.")
             return None, None
@@ -463,13 +416,11 @@ if RDKIT_AVAILABLE:
                     })
                     seen_cores.add(core_smiles_clean)
         
-        # Filter groups by minimum size and core size
+        # Filter groups by minimum size
         valid_groups = {}
         for core, comps in core_to_compounds.items():
             if len(comps) >= min_pairs_per_core:
-                # Check core size
-                if all(c['core_size'] >= min_core_atoms for c in comps):
-                    valid_groups[core] = comps
+                valid_groups[core] = comps
         
         if not valid_groups:
             st.warning(f"No valid cores found with {min_pairs_per_core}+ compounds.")
@@ -481,7 +432,7 @@ if RDKIT_AVAILABLE:
         
         all_pairs = []
         
-        for core, compounds in tqdm(valid_groups.items()):
+        for core, compounds in valid_groups.items():
             # Generate all unique pairs using combinations
             for i, j in combinations(range(len(compounds)), 2):
                 comp1 = compounds[i]
@@ -574,12 +525,6 @@ if RDKIT_AVAILABLE:
             mol2 = Chem.MolFromSmiles(rgroup2)
             
             if mol1 and mol2:
-                # Highlight attachment points
-                for mol in [mol1, mol2]:
-                    for atom in mol.GetAtoms():
-                        if atom.GetAtomicNum() == 0:
-                            atom.SetProp("atomNote", "*")
-                
                 # Create image
                 img = Draw.MolsToGridImage([mol1, mol2], 
                                           molsPerRow=2,
@@ -791,7 +736,7 @@ else:
     else:
         # Load and process data
         with st.spinner("Loading and preprocessing data..."):
-            df = load_and_preprocess_data(uploaded_file)
+            df = load_and_preprocess_data(uploaded_file, min_mw, max_mw)
         
         if df is not None and len(df) > 0:
             # Show dataset overview
@@ -820,6 +765,8 @@ else:
                         df, 
                         mmpa_method,
                         min_pairs_per_core,
+                        min_core_atoms,
+                        max_rgroup_atoms,
                         show_detailed_debug
                     )
                     
@@ -959,4 +906,3 @@ st.markdown("""
     <p>Based on proven RDKit workflow with FragmentMol(maxCuts=1) and proper fragment handling</p>
 </div>
 """, unsafe_allow_html=True)
-
