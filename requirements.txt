@@ -5,4 +5,5 @@ seaborn
 numpy
 pillow
 rdkit-pypi
+mols2grid
 
