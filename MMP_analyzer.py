@@ -114,7 +114,7 @@ class MMPAnalyzerGUI:
         title_label.pack()
         
         subtitle_label = tk.Label(title_frame,
-                                 text="Analyze SAR using matched molecular pairs from Hussain & Rea (2010)",
+                                 text="Analyze SAR using matched molecular pairs",
                                  font=('Arial', 10),
                                  bg=self.colors['bg'],
                                  fg=self.colors['text'])
