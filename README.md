@@ -1,22 +1,17 @@
-🧪 **Matched Molecular Pair (MMP) Analysis Tool**
+**Matched Molecular Pairs (MMP) Analyzer**
 
-**A Streamlit-based application for performing Matched Molecular Pair (MMP) analysis to identify structural transformations that influence the potency (pIC50) of drug molecules**
+**A desktop application for analyzing Structure-Activity Relationships (SAR) using Matched Molecular Pairs (MMPs) based on the method described by Hussain & Rea (2010). This tool helps medicinal chemists and computational chemists to identify meaningful structural transformations that correlate with changes in biological activity**.
 
-Explore matched molecular pair (MMP) analysis interactively using the Streamlit-based web tool.
+**Installation**
 
-👉 **Launch the App**  
-[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_red.svg)](https://mmp-analysis-vvper6mar624h8dkxby5pf.streamlit.app/)
+Prerequisites: **Python 3.7 or higher**
 
+Required Python packages: **tkinter, pandas, rdkit, matplotlib, seaborn, pillow (PIL)**
 
-⚠️ **Limitations**
+**pip install -r requirements.txt**
 
-**1. Single-cut fragmentation only**
+**Usage : python mmp_analyzer.py**
 
-**2. No stereochemistry handling**
-
-**3. Activity assumed comparable across assays**
-
-**4. Not suitable for covalent or metal-binding ligands (without modification)**
 
 📚 **References**
 
