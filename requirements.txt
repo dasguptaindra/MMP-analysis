@@ -1,0 +1,6 @@
+pandas                       
+rdkit-pypi      
+matplotlib               
+seaborn               
+pillow                 
+numpy                       
